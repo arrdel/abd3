@@ -1,0 +1,20 @@
+# Baseline: No RDR, no innovations (reproduces BD3-LMs behavior)
+name: baseline
+backbone: dit
+parameterization: subs
+T: 100
+
+self_conditioning: false
+self_cond_prob: 0.0
+cross_attn: true
+mixed_block_sizes: false
+block_size_choices: [4]
+adaptive_stopping: false
+stop_entropy_threshold: 0.1
+stop_agreement_threshold: 2
+time_conditioning: false  # BD3-LMs zeros out sigma
+
+ignore_bos: true
+mdlm_loss_scale: false
+fix_clipping: false
+var_min: null

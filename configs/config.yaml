@@ -1,0 +1,56 @@
+# ABD3 Main Configuration
+defaults:
+  - algo: abd3
+  - model: dit_small
+  - data: openwebtext
+  - noise: loglinear
+  - _self_
+
+seed: 42
+mode: train  # train, eval, sample
+block_size: 4
+
+tokenizer:
+  name: gpt2
+
+loader:
+  batch_size: 64
+  eval_batch_size: 16
+  num_workers: 4
+  pin_memory: true
+
+training:
+  max_steps: 500000
+  ema: 0.9999
+  antithetic_sampling: true
+  sampling_eps: 1e-3
+  precision: bf16-mixed
+  accum: 1
+  val_check_interval: 5000
+
+optim:
+  lr: 3e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01  # ABD3: enable weight decay (BD3-LMs used 0)
+  grad_clip: 1.0
+
+checkpointing:
+  save_dir: checkpoints/
+  save_every: 10000
+
+wandb:
+  enabled: false
+  project: abd3
+  name: abd3-run
+
+eval:
+  checkpoint_path: null
+  gen_ppl_eval_model_name_or_path: gpt2-large
+  perplexity_batch_size: 16
+  disable_ema: false
+
+sampling:
+  kv_cache: true
+  nucleus_p: 1.0
+  first_hitting: false

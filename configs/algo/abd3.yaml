@@ -1,0 +1,32 @@
+# ABD3 Algorithm Configuration
+name: abd3
+backbone: dit
+parameterization: subs
+T: 100
+
+# === ABD3 Innovations ===
+
+# Innovation 1: Self-conditioning
+self_conditioning: true
+self_cond_prob: 0.5  # 50% chance of using self-conditioning during training
+
+# Innovation 2: Two-stream (architectural - see model config)
+cross_attn: true  # Use two-stream cross-attention (not 2N concat)
+
+# Innovation 3: Mixed block-size training
+mixed_block_sizes: true
+block_size_choices: [1, 2, 4, 8, 16]
+
+# Innovation 4: Adaptive early stopping
+adaptive_stopping: true
+stop_entropy_threshold: 0.1
+stop_agreement_threshold: 2  # consecutive agreeing steps before stopping
+
+# Innovation 5: Per-block time conditioning
+time_conditioning: true  # BD3-LMs sets this to false (zeros out sigma)
+
+# Other
+ignore_bos: true
+mdlm_loss_scale: false
+fix_clipping: false
+var_min: null

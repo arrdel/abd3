@@ -1,0 +1,11 @@
+# ABD3 Feasibility Test - Tiny Model (4 layers, 256 dim, ~4M params)
+# For fast iteration on a single GPU in < 1 hour
+length: 256
+hidden_size: 256
+n_heads: 4
+n_blocks: 4
+cond_dim: 128
+dropout: 0.0
+attn_backend: sdpa
+tie_word_embeddings: false
+max_seqlen: 256

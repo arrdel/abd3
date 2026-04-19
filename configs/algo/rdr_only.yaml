@@ -1,0 +1,20 @@
+# RDR only: self-conditioning + adaptive stopping, no mixed blocks
+name: rdr_only
+backbone: dit
+parameterization: subs
+T: 100
+
+self_conditioning: true
+self_cond_prob: 0.5
+cross_attn: true
+mixed_block_sizes: false
+block_size_choices: [4]
+adaptive_stopping: true
+stop_entropy_threshold: 0.1
+stop_agreement_threshold: 2
+time_conditioning: true
+
+ignore_bos: true
+mdlm_loss_scale: false
+fix_clipping: false
+var_min: null

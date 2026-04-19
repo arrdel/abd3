@@ -1,0 +1,4 @@
+# WikiText-2 - small dataset for feasibility testing
+name: wikitext
+split: null
+subset: wikitext-2-raw-v1
