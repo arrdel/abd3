@@ -1,0 +1,64 @@
+# =============================================================================
+# ABD3 Feasibility Test Configuration
+# =============================================================================
+# Quick test on WikiText-2 with a tiny model (~4M params)
+# Expected: ~30 min on a single GPU, should see loss decrease within 1k steps
+# Purpose: Verify RDR (self-conditioning + adaptive stopping) trains correctly
+# =============================================================================
+
+defaults:
+  - algo: abd3
+  - model: dit_tiny
+  - data: wikitext2
+  - noise: loglinear
+  - _self_
+
+seed: 42
+mode: train
+block_size: 4
+
+tokenizer:
+  name: gpt2
+
+loader:
+  batch_size: 32
+  eval_batch_size: 16
+  num_workers: 2
+  pin_memory: true
+
+training:
+  max_steps: 5000
+  ema: 0.9999
+  antithetic_sampling: true
+  sampling_eps: 1e-3
+  precision: bf16-mixed
+  accum: 1
+  val_check_interval: 500
+
+optim:
+  lr: 5e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 200
+
+checkpointing:
+  save_dir: checkpoints/feasibility/
+  save_every: 1000
+
+wandb:
+  enabled: false
+  project: abd3-feasibility
+  name: rdr-feasibility
+
+eval:
+  checkpoint_path: null
+  gen_ppl_eval_model_name_or_path: gpt2
+  perplexity_batch_size: 16
+  disable_ema: false
+
+sampling:
+  kv_cache: true
+  nucleus_p: 1.0
+  first_hitting: false
