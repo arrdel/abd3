@@ -5,6 +5,7 @@
 # Use `make help` to list targets.
 
 .PHONY: help install install-dev test test-fast smoke smoke-ddp feas ppl gen \
+        zero-shot diversity gen-ppl mauve quality efficiency collect-results \
         lint format check clean
 
 PY            ?= python
@@ -55,6 +56,50 @@ zero-shot:  ## Zero-shot PPL sweep (WT103 / PTB / LAMBADA / PG19 / arXiv).
 		--n-samples 4 --device cuda --use-ema \
 		--json-out report/zero_shot/feasibility.json \
 		--markdown-out report/zero_shot/feasibility.md
+
+# ---------------------------------------------------------------------------
+# Quality / efficiency eval suite. Assumes `make gen` (or equivalent) has
+# produced a SampleRecord JSONL at $(SAMPLES_JSONL). Override to point at a
+# different run's samples.
+# ---------------------------------------------------------------------------
+SAMPLES_JSONL ?= report/samples/smoke.jsonl
+
+diversity:  ## Self-BLEU + distinct-n + repetition on $(SAMPLES_JSONL).
+	$(PY) -m eval.diversity --samples $(SAMPLES_JSONL) \
+		--json-out report/diversity/$(notdir $(basename $(SAMPLES_JSONL))).json
+
+gen-ppl:  ## Generation PPL under frozen GPT-2 on $(SAMPLES_JSONL).
+	$(PY) -m eval.gen_ppl --samples $(SAMPLES_JSONL) \
+		--scorer gpt2 --device cuda \
+		--json-out report/gen_ppl/$(notdir $(basename $(SAMPLES_JSONL))).json
+
+mauve:  ## MAUVE vs WT103 validation on $(SAMPLES_JSONL).
+	$(PY) -m eval.mauve --samples $(SAMPLES_JSONL) \
+		--refs-hf "wikitext|wikitext-103-raw-v1|validation|text" \
+		--featurize-model gpt2 --device cuda \
+		--json-out report/mauve/$(notdir $(basename $(SAMPLES_JSONL))).json
+
+quality:  ## Diversity + Gen-PPL + MAUVE all in one (MAUVE refs: WT103-val).
+	$(PY) -m eval.quality --samples $(SAMPLES_JSONL) \
+		--device cuda --gen-ppl-scorer gpt2 \
+		--mauve-refs-hf "wikitext|wikitext-103-raw-v1|validation|text" \
+		--json-out report/quality/$(notdir $(basename $(SAMPLES_JSONL))).json
+
+efficiency:  ## Sampler efficiency sweep (NFE / wall-clock / peak memory).
+	$(PY) -m eval.efficiency --checkpoint $(CKPT_FEAS) --device cuda \
+		--configs "adaptive=off,on ; block_size=4 ; batch_size=4,16 ; num_steps=10,20" \
+		--repeat 3 --warmup 1 \
+		--jsonl-out report/efficiency/feasibility.jsonl \
+		--markdown-out report/efficiency/feasibility.md
+
+collect-results:  ## Collect runs from wandb into CSV/markdown/LaTeX tables.
+	$(PY) -m eval.collect_results --project abd3 \
+		--group-by config.algo.name \
+		--csv-out report/tables/all_runs.csv \
+		--markdown-out report/tables/summary.md \
+		--latex-out report/tables/summary.tex \
+		--latex-caption "ABD3 ablation results" \
+		--latex-label "tab:abd3-ablation"
 
 lint:  ## Lint + format check (no modifications). What CI runs.
 	ruff check abd3/ eval/ tools/ tests/

@@ -1,0 +1,153 @@
+# Version-controlled Weights & Biases dashboard spec for the ABD3 project.
+#
+# This file describes the panels we want on the WandB workspace in a
+# portable YAML so a new contributor (or a re-imported project) can
+# re-create the same dashboard by running:
+#
+#     python -m eval.collect_results --apply-panels configs/wandb_panels/default.yaml
+#
+# We intentionally avoid the wandb "workspace export" format because it
+# pins exact UI coordinates and is churny in review. Instead we describe
+# the *intent* (panel type, metrics, grouping) and let the apply-step
+# translate to WandB's API.
+#
+# Reference: https://docs.wandb.ai/ref/python/public-api/workspace
+
+project: abd3
+entity: ${ABD3_WANDB_ENTITY:-null}   # null → use the default entity on wandb login
+
+# ---------------------------------------------------------------------------
+# Panels, grouped into sections.
+# ---------------------------------------------------------------------------
+
+sections:
+  - name: "Training — core"
+    panels:
+      - title: "Loss (train vs val)"
+        type: line
+        metrics:
+          - train/loss
+          - val/loss
+        smoothing: 0.0
+        x_axis: trainer/global_step
+      - title: "Perplexity (bounded)"
+        type: line
+        metrics:
+          - train/ppl
+          - val/ppl
+        log_y: true
+        x_axis: trainer/global_step
+      - title: "Gradient norm"
+        type: line
+        metrics:
+          - train/grad_norm
+        x_axis: trainer/global_step
+      - title: "Active block size (mixed-BS)"
+        type: line
+        metrics:
+          - train/block_size
+        description: >
+          When mixed_block_sizes is enabled, this line should oscillate
+          between {4, 8, 16} — a flat line indicates the sampler is
+          stuck or the mix is disabled.
+        x_axis: trainer/global_step
+
+  - name: "Training — per-block-size loss"
+    panels:
+      - title: "Loss broken out by block size"
+        type: line
+        metrics:
+          - train/loss_bs4
+          - train/loss_bs8
+          - train/loss_bs16
+        x_axis: trainer/global_step
+        description: >
+          Emitted only when mixed_block_sizes is on. A diverging
+          cluster (e.g. bs16 >> bs4) often means the longer context
+          is getting too few samples; retune the sampler weights.
+
+  - name: "Sampling efficiency"
+    panels:
+      - title: "Total NFE vs theoretical"
+        type: bar
+        group_by: config.algo.name
+        metrics:
+          - sampling/total_nfe
+          - sampling/theoretical_nfe
+      - title: "NFE savings (adaptive stop wins)"
+        type: bar
+        group_by: config.algo.name
+        metrics:
+          - sampling/nfe_savings
+        y_range: [0.0, 1.0]
+      - title: "Wall-clock per sample"
+        type: bar
+        group_by: config.algo.name
+        metrics:
+          - sampling/elapsed_seconds
+
+  - name: "Quality"
+    panels:
+      - title: "Distinct-n"
+        type: bar
+        group_by: name
+        metrics:
+          - quality/distinct_1
+          - quality/distinct_2
+          - quality/distinct_3
+          - quality/distinct_4
+      - title: "Self-BLEU"
+        type: bar
+        group_by: name
+        metrics:
+          - quality/self_bleu_3
+          - quality/self_bleu_4
+        description: "Lower = more diverse."
+      - title: "Generation PPL (GPT-2 scorer)"
+        type: bar
+        group_by: name
+        metrics:
+          - quality/corpus_ppl
+          - quality/median_sample_ppl
+        log_y: true
+      - title: "MAUVE"
+        type: bar
+        group_by: name
+        metrics:
+          - quality/mauve
+        y_range: [0.0, 1.0]
+
+  - name: "Zero-shot PPL"
+    panels:
+      - title: "PPL by corpus"
+        type: bar
+        group_by: tags
+        metrics:
+          - zero_shot/wikitext103
+          - zero_shot/wikitext2
+          - zero_shot/ptb
+          - zero_shot/lambada
+          - zero_shot/pg19
+          - zero_shot/arxiv
+        log_y: true
+
+# ---------------------------------------------------------------------------
+# Default filters for the workspace (applied on the runs table).
+# ---------------------------------------------------------------------------
+filters:
+  # Hide any run that died in the first minute — almost always a config typo.
+  - metric: trainer/global_step
+    op: ">="
+    value: 100
+  # Exclude dry-run / CI runs by default.
+  - tag_not_in: [ci, dry-run]
+
+# ---------------------------------------------------------------------------
+# Metadata baked into every programmatically-created panel.
+# ---------------------------------------------------------------------------
+metadata:
+  description: |
+    ABD3 standard dashboard. Regenerate after changing the panel list via
+        python -m eval.collect_results --apply-panels configs/wandb_panels/default.yaml
+  owner: arrdel
+  version: 1
