@@ -8,12 +8,16 @@
 # OOM in `torch.cuda.set_device()`.
 #
 # Usage:
-#   ./scripts/wait_for_gpus.sh [MIN_FREE_GIB] [POLL_SECONDS] [TIMEOUT_HOURS]
+#   ./scripts/wait_for_gpus.sh [MIN_FREE_GIB] [POLL_SECONDS] [TIMEOUT_HOURS] [CONSECUTIVE]
 #
 # Defaults:
-#   MIN_FREE_GIB = 8      (threshold for every GPU)
-#   POLL_SECONDS = 30
-#   TIMEOUT_HOURS = 24    (gives up eventually so we never wait forever)
+#   MIN_FREE_GIB  = 8      (threshold for every GPU)
+#   POLL_SECONDS  = 30
+#   TIMEOUT_HOURS = 168    (7 days; shared clusters can stay busy for a while)
+#   CONSECUTIVE   = 3      (require this many in-a-row successful polls before
+#                           declaring ready; protects against flaky launches
+#                           when another tenant briefly releases then reclaims
+#                           memory)
 #
 # Respects CUDA_VISIBLE_DEVICES when set (only those GPUs are required to be
 # free). Progress is printed every poll; the final decision line is always
@@ -23,7 +27,8 @@ set -euo pipefail
 
 MIN_FREE_GIB="${1:-8}"
 POLL_SECONDS="${2:-30}"
-TIMEOUT_HOURS="${3:-24}"
+TIMEOUT_HOURS="${3:-168}"
+CONSECUTIVE="${4:-3}"
 
 MIN_FREE_MIB=$(( MIN_FREE_GIB * 1024 ))
 MAX_ITERS=$(( TIMEOUT_HOURS * 3600 / POLL_SECONDS ))
@@ -37,8 +42,9 @@ else
 fi
 
 echo "[wait_for_gpus] waiting for ${SCOPE} to each have >= ${MIN_FREE_GIB} GiB free"
-echo "[wait_for_gpus] polling every ${POLL_SECONDS}s, giving up after ${TIMEOUT_HOURS}h"
+echo "[wait_for_gpus] polling every ${POLL_SECONDS}s, need ${CONSECUTIVE} in-a-row OK polls, giving up after ${TIMEOUT_HOURS}h"
 
+streak=0
 for iter in $(seq 1 "${MAX_ITERS}"); do
     # Returns one line per GPU: "<index>, <free MiB>"
     readarray -t rows < <(
@@ -66,13 +72,22 @@ for iter in $(seq 1 "${MAX_ITERS}"); do
         fi
     done
 
-    ts="$(date '+%H:%M:%S')"
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
     if (( all_ok == 1 )); then
-        echo "[wait_for_gpus] ${ts} OK: all GPUs have >= ${MIN_FREE_GIB} GiB free  (${summary})"
-        exit 0
+        streak=$(( streak + 1 ))
+        echo "[wait_for_gpus] ${ts} OK poll ${streak}/${CONSECUTIVE}  (${summary})"
+        if (( streak >= CONSECUTIVE )); then
+            echo "[wait_for_gpus] ${ts} READY: sustained >= ${MIN_FREE_GIB} GiB free on every GPU for ${CONSECUTIVE} polls; proceeding"
+            exit 0
+        fi
+    else
+        if (( streak > 0 )); then
+            echo "[wait_for_gpus] ${ts} streak broken (min-free GPU ${min_idx}: $((min_free/1024)) GiB)  (${summary})"
+        else
+            echo "[wait_for_gpus] ${ts} waiting... min-free GPU ${min_idx}: $((min_free/1024)) GiB  (${summary})"
+        fi
+        streak=0
     fi
-
-    echo "[wait_for_gpus] ${ts} waiting... min-free GPU ${min_idx}: $((min_free/1024)) GiB  (${summary})"
     sleep "${POLL_SECONDS}"
 done
 

@@ -30,7 +30,10 @@ echo "[retry_rdr_only] starting at $(date)"
 echo "[retry_rdr_only] initial GPU state:"
 nvidia-smi --query-gpu=index,memory.used,memory.free,utilization.gpu --format=csv
 
-./scripts/wait_for_gpus.sh 8 30 24
+# 8 GiB threshold, poll every 30s, up to 7 days, need 3 consecutive OK polls
+# (≈90s of sustained availability) before firing — shields us from tenants
+# who briefly release memory and immediately reclaim it.
+./scripts/wait_for_gpus.sh 8 30 168 3
 
 NAME="ablation_rdr_only"
 ALGO_OVERRIDE="algo=rdr_only"
@@ -72,7 +75,7 @@ fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] ${NAME} failed on attempt 1; waiting 60s then checking GPU state before retry"
 sleep 60
-./scripts/wait_for_gpus.sh 8 30 6
+./scripts/wait_for_gpus.sh 8 30 168 3
 
 if run_one 2; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] FINISHED ${NAME} (ok, attempt 2)"
