@@ -512,13 +512,22 @@ class ABD3Diffusion(L.LightningModule):
         return False
 
     @torch.no_grad()
-    def sample(self, n_samples, num_steps=None, block_size=None):
+    def sample(self, n_samples, num_steps=None, block_size=None,
+               track_nfe_per_block=False, progress=True):
         """Generate samples with all ABD3 innovations.
-        
+
         Args:
             n_samples: number of sequences to generate
             num_steps: denoising steps per block (can be reduced by adaptive stopping)
             block_size: block size for generation (can differ from training)
+            track_nfe_per_block: if True, also return a length-num_blocks list of
+                NFEs used per block. Lets callers see exactly when adaptive
+                stopping fires, which is the headline efficiency claim.
+            progress: show tqdm progress bar.
+
+        Returns:
+            (x, total_nfes) by default;
+            (x, total_nfes, per_block_nfe) if ``track_nfe_per_block`` is True.
         """
         if num_steps is None:
             num_steps = self.T
@@ -528,22 +537,26 @@ class ABD3Diffusion(L.LightningModule):
         seq_len = self.num_tokens
         num_blocks = seq_len // block_size
 
-        # Start fully masked
         x = self._sample_prior(n_samples, seq_len)
         past_x0 = None
         total_nfes = 0
+        per_block_nfe: list[int] = [] if track_nfe_per_block else None
 
         ones = torch.ones((n_samples, 1), device=self.device)
 
-        for block_idx in tqdm(range(num_blocks), desc='blocks'):
-            # Initialize block as masked
+        block_iter = range(num_blocks)
+        if progress:
+            block_iter = tqdm(block_iter, desc='blocks')
+
+        for block_idx in block_iter:
             eps = 1e-5
             timesteps = torch.linspace(1, eps, num_steps + 1, device=self.device)
             dt = (1 - eps) / num_steps
 
-            prev_x0_hat = None  # For self-conditioning
-            prev_prediction = None  # For adaptive stopping
+            prev_x0_hat = None  # self-conditioning
+            prev_prediction = None  # adaptive stopping agreement tracker
             consecutive_agreements = 0
+            block_nfe = 0
 
             for step_idx in range(num_steps):
                 t = timesteps[step_idx] * ones
@@ -553,8 +566,8 @@ class ABD3Diffusion(L.LightningModule):
                     prev_x0_hat=prev_x0_hat,
                     past_x0=past_x0)
                 total_nfes += 1
+                block_nfe += 1
 
-                # ---- Adaptive early stopping (Innovation #4) ----
                 if self.adaptive_stopping and step_idx > 2:
                     if prev_prediction is not None and (prev_x0_hat == prev_prediction).all():
                         consecutive_agreements += 1
@@ -566,7 +579,9 @@ class ABD3Diffusion(L.LightningModule):
 
                 prev_prediction = prev_x0_hat.clone()
 
-            # Block is done — update past context
+            if track_nfe_per_block:
+                per_block_nfe.append(block_nfe)
+
             block_start = block_idx * block_size
             block_end = (block_idx + 1) * block_size
             if past_x0 is None:
@@ -574,6 +589,8 @@ class ABD3Diffusion(L.LightningModule):
             else:
                 past_x0 = torch.cat([past_x0, x[:, block_start:block_end]], dim=1)
 
+        if track_nfe_per_block:
+            return x, total_nfes, per_block_nfe
         return x, total_nfes
 
     @torch.no_grad()
