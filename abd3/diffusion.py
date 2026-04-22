@@ -356,6 +356,57 @@ class ABD3Diffusion(L.LightningModule):
             self.ema.update(self._get_parameters())
 
     # ========================================================================
+    # Checkpoint I/O — EMA shadows are not registered buffers, so Lightning
+    # won't serialise them automatically. We hand-roll it so that checkpoints
+    # actually round-trip through ``load_from_checkpoint`` without losing the
+    # EMA weights (the thing we overwhelmingly evaluate on).
+    # ========================================================================
+    def on_save_checkpoint(self, checkpoint):
+        if self.ema is not None:
+            checkpoint['ema'] = self.ema.state_dict()
+
+    def on_load_checkpoint(self, checkpoint):
+        # HOOK ORDERING NOTE: In Lightning's load_from_checkpoint classmethod,
+        # this hook runs BEFORE `model.load_state_dict(checkpoint['state_dict'])`,
+        # so `self._get_parameters()` here is still the random init — we must
+        # not seed EMA shadows from it. We only *consume* data already in the
+        # checkpoint here; seeding-from-live is deferred to `sync_ema_from_live`,
+        # which callers invoke after load.
+        if self.ema is None:
+            return
+        if 'ema' in checkpoint:
+            self.ema.load_state_dict(checkpoint['ema'])
+            self._ema_needs_live_reseed = False
+        else:
+            import warnings
+            warnings.warn(
+                "Checkpoint has no 'ema' key — will fall back to live weights "
+                "after load_state_dict completes. Call "
+                "`model.sync_ema_from_live()` if invoking load_from_checkpoint "
+                "directly, or use `eval.perplexity.load_abd3_from_checkpoint` "
+                "which does this automatically.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._ema_needs_live_reseed = True
+
+    def sync_ema_from_live(self):
+        """Copy the current live params into the EMA shadow buffer.
+
+        Call this after ``load_from_checkpoint`` when the checkpoint lacked an
+        ``'ema'`` key. It gives the EMA-swap code path well-defined semantics
+        ("evaluate the trained live weights") rather than the hook-ordering
+        trap that was silently swapping *random init* back over the loaded
+        weights.
+        """
+        if self.ema is None:
+            return
+        self.ema.shadow_params = [
+            p.clone().detach() for p in self._get_parameters()
+        ]
+        self._ema_needs_live_reseed = False
+
+    # ========================================================================
     # Sampling with self-conditioning + adaptive stopping
     # ========================================================================
 
