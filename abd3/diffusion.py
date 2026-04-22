@@ -415,20 +415,32 @@ class ABD3Diffusion(L.LightningModule):
                           dtype=torch.long, device=self.device)
 
     @torch.no_grad()
-    def _ddpm_update_with_self_cond(self, x, t, dt, block_size,
-                                     prev_x0_hat=None, past_x0=None):
-        """Single DDPM denoising step with self-conditioning.
-        
+    def _denoise_tail_block(self, x_accum, t, dt, block_size,
+                            prev_x0_hat=None):
+        """One DDPM step on the block at the tail of ``x_accum``.
+
+        Sliding-window semi-AR: ``x_accum`` is always ``[B, (k+1)*block_size]``
+        where blocks ``[0..k)`` are already fully decoded and block ``k`` is
+        being denoised at the tail. Past positions in ``x_accum`` hold their
+        decoded ids; tail positions may still contain ``mask_index``.
+
+        Cross-attention context is constructed by masking the tail block of
+        ``x_accum`` so the model cannot "see" the block it's supposed to be
+        predicting through the x_0 stream. Self-conditioning uses the
+        previous block-local prediction padded with masks for past positions.
+
         Args:
-            x: [B, N] current noised sequence
-            t: [B, 1] current timestep
-            dt: timestep delta
-            block_size: current block size
-            prev_x0_hat: [B, block_size] previous x̂_0 prediction (self-conditioning)
-            past_x0: [B, N-block_size] decoded past blocks for cross-attention
-        
+            x_accum: [B, L] current working sequence, where L = (k+1)*block_size.
+            t: [B, 1] current timestep.
+            dt: scalar timestep delta.
+            block_size: current block size (int).
+            prev_x0_hat: [B, block_size] previous x̂_0 prediction for the tail
+                block, or None on the first step of each block.
+
         Returns:
-            (new_x0_hat, x_next): updated prediction and next state
+            (new_x0_hat, x_accum_next) where new_x0_hat is [B, block_size]
+            argmax predictions for the tail block, and x_accum_next has the
+            same shape as x_accum with the tail block updated.
         """
         _, move_chance_t = self.noise(t)
         _, move_chance_s = self.noise(t - dt)
@@ -437,46 +449,39 @@ class ABD3Diffusion(L.LightningModule):
         move_chance_s = move_chance_s[:, None]
         mask_prob = move_chance_s / move_chance_t
 
-        # Build full x0 context for cross-attention
-        x0_context = None
-        if past_x0 is not None:
-            # Pad with masks for current block
-            x0_context = torch.cat([
-                past_x0,
-                torch.full((x.shape[0], block_size), self.mask_index,
-                           device=x.device, dtype=torch.long)
-            ], dim=1)
+        # Cross-attn context: decoded past + mask block at the tail. Masking
+        # the tail avoids leaking the unfinished current block into itself
+        # via the x_0 stream.
+        x0_context = x_accum.clone()
+        x0_context[:, -block_size:] = self.mask_index
 
-        # Forward pass with self-conditioning (Innovation #1 at inference)
-        x_block = x[:, -block_size:]
-
-        # Build prev_x0_hat for full sequence if needed
+        # Self-conditioning: previous prediction padded with masks for past
+        # positions so its shape matches x_accum.
         full_prev = None
         if prev_x0_hat is not None:
-            if past_x0 is not None:
-                full_prev = torch.cat([past_x0, prev_x0_hat], dim=1)
-            else:
-                full_prev = prev_x0_hat
+            full_prev = torch.full_like(x_accum, self.mask_index)
+            full_prev[:, -block_size:] = prev_x0_hat
 
-        p_x0 = self.forward(
-            x, sigma_t, x0=x0_context, prev_x0_hat=full_prev,
+        log_p = self.forward(
+            x_accum, sigma_t, x0=x0_context, prev_x0_hat=full_prev,
             block_size=block_size, sample_mode=True)
-        p_x0 = p_x0[:, -block_size:].to(torch.float64).exp()
+        p_x0 = log_p[:, -block_size:].to(torch.float64).exp()
 
-        # Get new x0_hat prediction for next step's self-conditioning
         new_x0_hat = p_x0.argmax(dim=-1)
 
-        # DDPM update
+        # DDPM posterior over the tail block.
         q_xs = p_x0 * (1 - mask_prob)
         q_xs[:, :, self.mask_index] = mask_prob.squeeze(-1)
         x_block_new = _sample_categorical(q_xs)
 
-        # Keep unmasked tokens
-        copy_flag = (x[:, -block_size:] != self.mask_index).to(x.dtype)
-        x_block_new = copy_flag * x[:, -block_size:] + (1 - copy_flag) * x_block_new
-        x_new = torch.cat([x[:, :-block_size], x_block_new], dim=-1)
+        # Preserve tokens that are already unmasked (substitution
+        # parameterization: once we pick a token, keep it).
+        tail = x_accum[:, -block_size:]
+        copy_flag = (tail != self.mask_index).to(tail.dtype)
+        x_block_new = copy_flag * tail + (1 - copy_flag) * x_block_new
 
-        return new_x0_hat, x_new
+        x_accum_next = torch.cat([x_accum[:, :-block_size], x_block_new], dim=-1)
+        return new_x0_hat, x_accum_next
 
     @torch.no_grad()
     def _check_early_stop(self, p_x0, prev_prediction, step):
@@ -514,19 +519,34 @@ class ABD3Diffusion(L.LightningModule):
     @torch.no_grad()
     def sample(self, n_samples, num_steps=None, block_size=None,
                track_nfe_per_block=False, progress=True):
-        """Generate samples with all ABD3 innovations.
+        """Generate samples with all ABD3 innovations (semi-AR, sliding window).
+
+        Sampling flow (one block at a time, left-to-right):
+
+          * ``x_accum`` starts empty and grows by ``block_size`` each outer
+            iteration. Block k is appended as all-masks, denoised in place
+            for up to ``num_steps`` inner DDPM steps, then frozen before
+            block k+1 is appended.
+          * Inside each block we apply self-conditioning (the previous inner
+            step's argmax feeds back as ``prev_x0_hat``) and adaptive early
+            stopping (break when the argmax prediction matches the previous
+            one for ``stop_agreement_threshold`` consecutive steps).
+          * The model only ever sees the current prefix ``x_accum`` — not the
+            full ``model.length`` — which is what makes the cross-attention
+            context well-defined (it equals the decoded past plus a mask
+            block at the tail).
 
         Args:
-            n_samples: number of sequences to generate
-            num_steps: denoising steps per block (can be reduced by adaptive stopping)
-            block_size: block size for generation (can differ from training)
-            track_nfe_per_block: if True, also return a length-num_blocks list of
-                NFEs used per block. Lets callers see exactly when adaptive
-                stopping fires, which is the headline efficiency claim.
-            progress: show tqdm progress bar.
+            n_samples: number of sequences to generate.
+            num_steps: max denoising steps per block (default ``self.T``).
+                Actual per-block NFE may be lower if adaptive stopping fires.
+            block_size: generation block size (default ``self.block_size``).
+                Must divide ``self.num_tokens`` evenly.
+            track_nfe_per_block: if True, also return the per-block NFE trace.
+            progress: show tqdm progress bar over blocks.
 
         Returns:
-            (x, total_nfes) by default;
+            (x, total_nfes) by default, shape ``[n_samples, num_tokens]``;
             (x, total_nfes, per_block_nfe) if ``track_nfe_per_block`` is True.
         """
         if num_steps is None:
@@ -535,41 +555,54 @@ class ABD3Diffusion(L.LightningModule):
             block_size = self.block_size
 
         seq_len = self.num_tokens
+        if seq_len % block_size != 0:
+            raise ValueError(
+                f"sample(): seq_len ({seq_len}) must be divisible by "
+                f"block_size ({block_size})"
+            )
         num_blocks = seq_len // block_size
 
-        x = self._sample_prior(n_samples, seq_len)
-        past_x0 = None
         total_nfes = 0
         per_block_nfe: list[int] = [] if track_nfe_per_block else None
 
         ones = torch.ones((n_samples, 1), device=self.device)
+        eps = 1e-5
+        dt = (1 - eps) / num_steps
+
+        # x_accum grows by one block per outer iteration; starts empty and
+        # ends with shape [n_samples, num_blocks * block_size] == [n, seq_len].
+        x_accum: torch.Tensor | None = None
 
         block_iter = range(num_blocks)
         if progress:
             block_iter = tqdm(block_iter, desc='blocks')
 
         for block_idx in block_iter:
-            eps = 1e-5
-            timesteps = torch.linspace(1, eps, num_steps + 1, device=self.device)
-            dt = (1 - eps) / num_steps
+            # Append a fresh all-masks block at the tail.
+            new_block = self._sample_prior(n_samples, block_size)
+            x_accum = new_block if x_accum is None else torch.cat(
+                [x_accum, new_block], dim=1)
 
-            prev_x0_hat = None  # self-conditioning
-            prev_prediction = None  # adaptive stopping agreement tracker
+            timesteps = torch.linspace(1, eps, num_steps + 1,
+                                        device=self.device)
+
+            prev_x0_hat = None           # self-conditioning buffer
+            prev_prediction = None       # adaptive-stopping agreement buffer
             consecutive_agreements = 0
             block_nfe = 0
 
             for step_idx in range(num_steps):
                 t = timesteps[step_idx] * ones
 
-                prev_x0_hat, x = self._ddpm_update_with_self_cond(
-                    x, t, dt, block_size,
-                    prev_x0_hat=prev_x0_hat,
-                    past_x0=past_x0)
+                prev_x0_hat, x_accum = self._denoise_tail_block(
+                    x_accum, t, dt, block_size, prev_x0_hat=prev_x0_hat)
+
                 total_nfes += 1
                 block_nfe += 1
 
                 if self.adaptive_stopping and step_idx > 2:
-                    if prev_prediction is not None and (prev_x0_hat == prev_prediction).all():
+                    if (prev_prediction is not None
+                            and (prev_x0_hat == prev_prediction).all()):
                         consecutive_agreements += 1
                     else:
                         consecutive_agreements = 0
@@ -582,16 +615,9 @@ class ABD3Diffusion(L.LightningModule):
             if track_nfe_per_block:
                 per_block_nfe.append(block_nfe)
 
-            block_start = block_idx * block_size
-            block_end = (block_idx + 1) * block_size
-            if past_x0 is None:
-                past_x0 = x[:, block_start:block_end].clone()
-            else:
-                past_x0 = torch.cat([past_x0, x[:, block_start:block_end]], dim=1)
-
         if track_nfe_per_block:
-            return x, total_nfes, per_block_nfe
-        return x, total_nfes
+            return x_accum, total_nfes, per_block_nfe
+        return x_accum, total_nfes
 
     @torch.no_grad()
     def restore_model_and_sample(self, num_steps=None):

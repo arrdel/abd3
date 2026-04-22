@@ -3,16 +3,9 @@
 Thin CLI + library wrapper around ``ABD3Diffusion.sample``. Emits a JSONL file
 where each line is a single generation record.
 
-.. warning::
-    ``ABD3Diffusion.sample`` currently has a pre-existing bug in its semi-AR
-    (multi-block) path: the code concatenates ``past_x0`` into contexts whose
-    shape doesn't match ``model.length``, which blows up inside the DiT
-    forward. It was never caught because ``sample()`` was never exercised
-    end-to-end (training uses only ``_loss``). Until that's fixed, pass
-    ``--block-size`` equal to ``model.length`` on the CLI to run pure
-    (non-AR) diffusion sampling, which goes through a single
-    ``_ddpm_update_with_self_cond`` call with ``past_x0=None`` and works.
-    Tracked as a follow-up; see tests/test_generate.py for regression.
+Both the semi-AR (``block_size < model.length``) and one-shot diffusion
+(``block_size == model.length``) paths of ``ABD3Diffusion.sample`` are
+exercised; regression coverage lives in ``tests/test_sampler.py``.
 
     {
       "sample_id":       0,
