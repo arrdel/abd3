@@ -68,6 +68,11 @@ run_experiment() {
     local name="$1"
     local algo_override="$2"
 
+    # Gate every experiment on cluster-wide GPU headroom. On a shared box the
+    # dominant failure mode is not a bug in our code but another tenant
+    # saturating VRAM the exact second we call torch.cuda.set_device().
+    ./scripts/wait_for_gpus.sh 8 30 24
+
     if run_one "${name}" "${algo_override}" 1; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] FINISHED experiment: ${name} (ok, attempt 1)"
         return 0
@@ -75,6 +80,7 @@ run_experiment() {
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] experiment '${name}' failed on attempt 1; retrying once"
     sleep 10
+    ./scripts/wait_for_gpus.sh 8 30 6
 
     if run_one "${name}" "${algo_override}" 2; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] FINISHED experiment: ${name} (ok, attempt 2)"
