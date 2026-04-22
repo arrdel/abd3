@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+title: "ABD3: Self-Conditioned Block Diffusion with Adaptive Block Sizes for Language Modeling"
+message: "If you use this software, please cite the repository."
+type: software
+authors:
+  - given-names: "arrdel"
+    email: "chindahel1@gmail.com"
+repository-code: "https://github.com/arrdel/abd3"
+license: Apache-2.0
+keywords:
+  - diffusion-language-models
+  - block-diffusion
+  - self-conditioning
+  - adaptive-stopping
+  - discrete-diffusion
+abstract: |
+  ABD3 extends Block Discrete Denoising Diffusion (BD3-LMs) with four
+  innovations: (1) self-conditioning within blocks, (2) efficient two-stream
+  training that replaces the 2N concatenation with cross-attention, (3)
+  mixed block-size training that enables inference-time block adaptation,
+  and (4) adaptive early stopping of per-block denoising based on entropy
+  and prediction agreement.
+preferred-citation:
+  type: software
+  title: "ABD3: Self-Conditioned Block Diffusion with Adaptive Block Sizes for Language Modeling"
+  authors:
+    - given-names: "arrdel"
+      email: "chindahel1@gmail.com"
+  year: 2026
+  url: "https://github.com/arrdel/abd3"

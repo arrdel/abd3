@@ -1,0 +1,41 @@
+# Run on every commit. The tools agree with pyproject.toml so the same
+# checks run locally, in pre-commit, and in GitHub Actions CI.
+#
+# Usage:
+#   pip install pre-commit && pre-commit install
+#   pre-commit run --all-files   # one-off sweep
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: debug-statements
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+        files: ^(abd3|eval|tools|tests)/
+      - id: ruff-format
+        files: ^(abd3|eval|tools|tests)/
+
+  # mypy runs in loose mode (see [tool.mypy] in pyproject.toml). It flags
+  # real type errors but does not block merges on missing third-party stubs.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        files: ^(abd3|eval|tools|tests)/
+        args: ["--config-file=pyproject.toml"]
+        additional_dependencies:
+          - "torch>=2.0"
+          - "numpy"
+          - "omegaconf"
+          - "transformers"

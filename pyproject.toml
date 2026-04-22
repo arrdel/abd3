@@ -1,0 +1,58 @@
+# Project-level tool configuration for ABD3. We intentionally do NOT declare
+# [project] / [build-system] tables because ABD3 is consumed as a research
+# repo, not a pip-installable package — requirements.txt is the source of
+# truth for runtime deps. If/when we publish to PyPI, swap this for the
+# usual PEP 621 layout.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    ".venv",
+    "baselines",       # vendored external BD3-LMs code; not ours to lint
+    "checkpoints",
+    "logs",
+    "outputs",
+    "report",
+]
+
+[tool.ruff.lint]
+# F: pyflakes,  E/W: pycodestyle,  I: isort,  B: bugbear,  UP: pyupgrade,
+# SIM: flake8-simplify. Kept intentionally lean — we'd rather pass the
+# baseline today than chase lots of pedantic warnings later.
+select = ["F", "E", "W", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",  # line length handled by black/formatter, not the linter
+    "B008",  # allow function calls in argument defaults (hydra/omegaconf patterns)
+    "SIM108",  # ternary rewrites often hurt readability in math-heavy code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts in tests are fine
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+# Loose on purpose: we want mypy to surface genuinely broken signatures
+# (e.g. tensor typed as int somewhere) without blocking merges on every
+# missing third-party stub. Tighten project-by-project as annotations land.
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+exclude = [
+    "baselines/",
+    "checkpoints/",
+    "logs/",
+    "outputs/",
+    "report/",
+    "\\.venv/",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
