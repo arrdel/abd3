@@ -50,6 +50,12 @@ gen:  ## Generate 4 samples from the feasibility ckpt (semi-AR, block_size=4).
 		--n-samples 4 --num-steps 20 --block-size 4 --device cuda \
 		--use-ema --out report/samples/smoke.jsonl --print-samples
 
+zero-shot:  ## Zero-shot PPL sweep (WT103 / PTB / LAMBADA / PG19 / arXiv).
+	$(PY) -m eval.zero_shot --checkpoint $(CKPT_FEAS) \
+		--n-samples 4 --device cuda --use-ema \
+		--json-out report/zero_shot/feasibility.json \
+		--markdown-out report/zero_shot/feasibility.md
+
 lint:  ## Lint + format check (no modifications). What CI runs.
 	ruff check abd3/ eval/ tools/ tests/
 	ruff format --check abd3/ eval/ tools/ tests/
