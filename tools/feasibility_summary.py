@@ -24,7 +24,6 @@ import statistics
 import sys
 from collections import defaultdict
 
-
 EXPERIMENT_ORDER = ["baseline", "rdr_only", "abd3"]
 
 
@@ -98,7 +97,10 @@ def main() -> int:
         algo = parse_hparams_algo(hparams) or "unknown"
         tr, va = load_curve(metrics)
         if algo in found:
-            print(f"[warn] {algo} already seen ({found[algo][0].name}); ignoring {vdir.name}", file=sys.stderr)
+            print(
+                f"[warn] {algo} already seen ({found[algo][0].name}); ignoring {vdir.name}",
+                file=sys.stderr,
+            )
             continue
         found[algo] = (vdir, tr, va)
 
@@ -107,14 +109,16 @@ def main() -> int:
         return 1
 
     # Ordered: baseline, rdr_only, abd3 — missing ones are shown as '(pending)'.
-    ordered = [(algo, found.get(algo)) for algo in EXPERIMENT_ORDER if algo in found or True]
+    ordered = [(algo, found.get(algo)) for algo in EXPERIMENT_ORDER if True]
 
     print()
     print("=" * 88)
     print(f"{'ABD3 feasibility suite — validation loss trajectory':^88}")
     print("=" * 88)
     print()
-    print(f"{'run':<28}{'version':<12}{'#train':>8}{'#val':>8}{'tr@5k':>9}{'val@1k':>9}{'val@3k':>9}{'min_val':>10}")
+    print(
+        f"{'run':<28}{'version':<12}{'#train':>8}{'#val':>8}{'tr@5k':>9}{'val@1k':>9}{'val@3k':>9}{'min_val':>10}"
+    )
     print("-" * 88)
 
     for algo, entry in ordered:
@@ -127,10 +131,12 @@ def main() -> int:
             print(f"{label:<28}{'(pending)':<12}")
             continue
         vdir, tr, va = entry
+
         def nearest(points, target):
             if not points:
                 return None
             return min(points, key=lambda x: abs(x[0] - target))[1]
+
         min_val = min(v for _, v in va) if va else None
         print(
             f"{label:<28}{vdir.name:<12}{len(tr):>8}{len(va):>8}"
@@ -171,7 +177,7 @@ def main() -> int:
             print(f"  delta (rdr - base)    : {min_r - min_b:+.3f} nats")
             print(f"  delta (abd3 - rdr)    : {min_a - min_r:+.3f} nats")
         else:
-            print(f"  rdr_only min val loss : (pending)")
+            print("  rdr_only min val loss : (pending)")
     print()
     return 0
 

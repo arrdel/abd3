@@ -46,12 +46,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import math
-import os
 import pathlib
 import sys
 import time
-from typing import Optional
 
 import torch
 import transformers
@@ -91,8 +88,8 @@ def generate(
     tokenizer: transformers.PreTrainedTokenizer,
     *,
     n_samples: int = 4,
-    num_steps: Optional[int] = None,
-    block_size: Optional[int] = None,
+    num_steps: int | None = None,
+    block_size: int | None = None,
     seed: int = 42,
     progress: bool = False,
     checkpoint_path: str = "",
@@ -126,34 +123,30 @@ def generate(
     # Per-block NFE is aggregated across the whole batch (the sampler doesn't
     # branch per-sequence), so every record in this batch shares the same
     # NFE trace. We still emit it per-record for downstream joins.
-    sampler_name = (
-        "ddpm_self_cond"
-        if getattr(model, "self_conditioning", False)
-        else "ddpm"
-    )
+    sampler_name = "ddpm_self_cond" if getattr(model, "self_conditioning", False) else "ddpm"
     if getattr(model, "adaptive_stopping", False):
         sampler_name += "+adaptive_stop"
 
     records: list[SampleRecord] = []
-    for i, (text, token_row) in enumerate(zip(texts, x.cpu().tolist())):
-        records.append(SampleRecord(
-            sample_id=i,
-            text=text,
-            token_ids=list(token_row),
-            block_size=int(effective_block_size),
-            num_steps=int(effective_num_steps),
-            total_nfe=int(sum(per_block_nfe)),
-            per_block_nfe=list(per_block_nfe),
-            theoretical_nfe=int(theoretical),
-            nfe_savings=(
-                1.0 - sum(per_block_nfe) / theoretical if theoretical > 0 else 0.0
-            ),
-            elapsed_seconds=elapsed,
-            seed=seed,
-            checkpoint=checkpoint_path,
-            algo=algo_name,
-            sampler=sampler_name,
-        ))
+    for i, (text, token_row) in enumerate(zip(texts, x.cpu().tolist(), strict=False)):
+        records.append(
+            SampleRecord(
+                sample_id=i,
+                text=text,
+                token_ids=list(token_row),
+                block_size=int(effective_block_size),
+                num_steps=int(effective_num_steps),
+                total_nfe=int(sum(per_block_nfe)),
+                per_block_nfe=list(per_block_nfe),
+                theoretical_nfe=int(theoretical),
+                nfe_savings=(1.0 - sum(per_block_nfe) / theoretical if theoretical > 0 else 0.0),
+                elapsed_seconds=elapsed,
+                seed=seed,
+                checkpoint=checkpoint_path,
+                algo=algo_name,
+                sampler=sampler_name,
+            )
+        )
 
     return records
 
@@ -170,21 +163,37 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--config-name", default="feasibility")
-    ap.add_argument("--overrides", nargs="*", default=[],
-                    help="Hydra-style overrides, e.g. algo=baseline block_size=8.")
+    ap.add_argument(
+        "--overrides",
+        nargs="*",
+        default=[],
+        help="Hydra-style overrides, e.g. algo=baseline block_size=8.",
+    )
     ap.add_argument("--n-samples", type=int, default=4)
-    ap.add_argument("--num-steps", type=int, default=None,
-                    help="Denoising steps per block (default: model.T from config).")
-    ap.add_argument("--block-size", type=int, default=None,
-                    help="Block size for generation (default: model.block_size).")
+    ap.add_argument(
+        "--num-steps",
+        type=int,
+        default=None,
+        help="Denoising steps per block (default: model.T from config).",
+    )
+    ap.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="Block size for generation (default: model.block_size).",
+    )
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     ap.add_argument("--use-ema", dest="use_ema", action="store_true", default=True)
     ap.add_argument("--no-ema", dest="use_ema", action="store_false")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--out", default=None,
-                    help="Output JSONL path. If omitted, only prints to stdout.")
-    ap.add_argument("--print-samples", action="store_true",
-                    help="Print each decoded sample (truncated) to stdout.")
+    ap.add_argument(
+        "--out", default=None, help="Output JSONL path. If omitted, only prints to stdout."
+    )
+    ap.add_argument(
+        "--print-samples",
+        action="store_true",
+        help="Print each decoded sample (truncated) to stdout.",
+    )
     return ap
 
 
@@ -204,7 +213,7 @@ def _format_summary(records: list[SampleRecord]) -> str:
     )
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
     print(f"[gen] loading checkpoint: {args.checkpoint}")
@@ -223,7 +232,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     records = generate(
-        model, tok,
+        model,
+        tok,
         n_samples=args.n_samples,
         num_steps=args.num_steps,
         block_size=args.block_size,
@@ -240,8 +250,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.print_samples:
         for r in records:
             preview = r.text.replace("\n", " ")[:180]
-            print(f"\n--- sample {r.sample_id}  NFE={r.total_nfe}/"
-                  f"{r.theoretical_nfe} ({r.nfe_savings * 100:.0f}% saved) ---")
+            print(
+                f"\n--- sample {r.sample_id}  NFE={r.total_nfe}/"
+                f"{r.theoretical_nfe} ({r.nfe_savings * 100:.0f}% saved) ---"
+            )
             print(preview + ("…" if len(r.text) > 180 else ""))
 
     if args.out:

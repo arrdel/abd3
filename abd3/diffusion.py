@@ -17,22 +17,19 @@ import itertools
 import math
 from dataclasses import dataclass
 
-import hydra.utils
 import lightning as L
-import numpy as np
 import torch
-import torch.nn.functional as F
 import transformers
 from tqdm import tqdm
 
 from . import noise_schedule, utils
 from .models import dit as models_dit
 from .models import ema as models_ema
-from .models.attention import sample_block_size, BLOCK_SIZE_CHOICES
+from .models.attention import BLOCK_SIZE_CHOICES, sample_block_size
 
 
 def _sample_categorical(categorical_probs):
-    gumbel_norm = (1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log())
+    gumbel_norm = 1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log()
     return (categorical_probs / gumbel_norm).argmax(dim=-1)
 
 
@@ -49,7 +46,7 @@ class Loss:
 
 class ABD3Diffusion(L.LightningModule):
     """ABD3: Self-Conditioned Block Diffusion with Adaptive Block Sizes.
-    
+
     Innovations over BD3-LMs:
     1. Self-conditioning within blocks
     2. Efficient two-stream architecture (N tokens, not 2N)
@@ -66,7 +63,7 @@ class ABD3Diffusion(L.LightningModule):
         self.vocab_size = tokenizer.vocab_size
 
         # Mask token setup
-        if not hasattr(tokenizer, 'mask_token') or tokenizer.mask_token is None:
+        if not hasattr(tokenizer, "mask_token") or tokenizer.mask_token is None:
             self.mask_index = self.vocab_size
             self.vocab_size += 1
         else:
@@ -78,21 +75,21 @@ class ABD3Diffusion(L.LightningModule):
         self.neg_infinity = -1e9
 
         # Block size configuration
-        self.block_size = getattr(config, 'block_size', config.model.length)
-        self.mixed_block_sizes = getattr(config.algo, 'mixed_block_sizes', False)
-        self.block_size_choices = getattr(config.algo, 'block_size_choices', BLOCK_SIZE_CHOICES)
+        self.block_size = getattr(config, "block_size", config.model.length)
+        self.mixed_block_sizes = getattr(config.algo, "mixed_block_sizes", False)
+        self.block_size_choices = getattr(config.algo, "block_size_choices", BLOCK_SIZE_CHOICES)
 
         # Self-conditioning (NEW in ABD3)
-        self.self_conditioning = getattr(config.algo, 'self_conditioning', True)
-        self.self_cond_prob = getattr(config.algo, 'self_cond_prob', 0.5)
+        self.self_conditioning = getattr(config.algo, "self_conditioning", True)
+        self.self_cond_prob = getattr(config.algo, "self_cond_prob", 0.5)
 
         # Per-block time conditioning (NEW in ABD3 - enabled by default)
-        self.time_conditioning = getattr(config.algo, 'time_conditioning', True)
+        self.time_conditioning = getattr(config.algo, "time_conditioning", True)
 
         # Adaptive early stopping (NEW in ABD3)
-        self.adaptive_stopping = getattr(config.algo, 'adaptive_stopping', True)
-        self.stop_entropy_threshold = getattr(config.algo, 'stop_entropy_threshold', 0.1)
-        self.stop_agreement_threshold = getattr(config.algo, 'stop_agreement_threshold', 2)
+        self.adaptive_stopping = getattr(config.algo, "adaptive_stopping", True)
+        self.stop_entropy_threshold = getattr(config.algo, "stop_entropy_threshold", 0.1)
+        self.stop_agreement_threshold = getattr(config.algo, "stop_agreement_threshold", 2)
 
         # Antithetic sampling
         self.antithetic_sampling = config.training.antithetic_sampling
@@ -106,7 +103,8 @@ class ABD3Diffusion(L.LightningModule):
         # EMA
         if config.training.ema > 0:
             self.ema = models_ema.ExponentialMovingAverage(
-                self._get_parameters(), decay=config.training.ema)
+                self._get_parameters(), decay=config.training.ema
+            )
         else:
             self.ema = None
 
@@ -121,18 +119,18 @@ class ABD3Diffusion(L.LightningModule):
         """Substitution parameterization: lock unmasked tokens."""
         logits[:, :, self.mask_index] += self.neg_infinity
         logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
-        unmasked = (xt != self.mask_index)
+        unmasked = xt != self.mask_index
         logits[unmasked] = self.neg_infinity
         logits[unmasked, xt[unmasked]] = 0
         return logits
 
     def _process_sigma(self, sigma):
         """Process sigma for time conditioning.
-        
+
         ABD3 change: We keep actual sigma values (per-block conditioning)
         instead of zeroing them out like BD3-LMs.
         """
-        if self.parameterization == 'ar':
+        if self.parameterization == "ar":
             return None
         if sigma.ndim == 2:
             sigma = sigma.mean(-1).squeeze()
@@ -150,10 +148,18 @@ class ABD3Diffusion(L.LightningModule):
     # Forward pass
     # ========================================================================
 
-    def forward(self, x_t, sigma, x0=None, prev_x0_hat=None,
-                block_size=None, sample_mode=False, store_kv=False):
+    def forward(
+        self,
+        x_t,
+        sigma,
+        x0=None,
+        prev_x0_hat=None,
+        block_size=None,
+        sample_mode=False,
+        store_kv=False,
+    ):
         """Forward pass through the two-stream model.
-        
+
         Args:
             x_t: [B, N] noised tokens (N tokens, NOT 2N!)
             sigma: noise level
@@ -162,18 +168,23 @@ class ABD3Diffusion(L.LightningModule):
             block_size: override block size
             sample_mode: inference mode
             store_kv: cache KV
-        
+
         Returns:
             log probabilities [B, N, V]
         """
         sigma = self._process_sigma(sigma)
 
         logits = self.backbone(
-            x_t, sigma, x0=x0, prev_x0_hat=prev_x0_hat,
-            block_size=block_size, sample_mode=sample_mode,
-            store_kv=store_kv)
+            x_t,
+            sigma,
+            x0=x0,
+            prev_x0_hat=prev_x0_hat,
+            block_size=block_size,
+            sample_mode=sample_mode,
+            store_kv=store_kv,
+        )
 
-        if self.parameterization == 'subs':
+        if self.parameterization == "subs":
             return self._subs_parameterization(logits=logits, xt=x_t)
         return logits
 
@@ -187,8 +198,9 @@ class ABD3Diffusion(L.LightningModule):
         x_t = torch.where(move_indices, self.mask_index, x0)
         return x_t
 
-    def _sample_t(self, shape, device, block_size=None,
-                  sampling_eps_min=1e-3, sampling_eps_max=1.0):
+    def _sample_t(
+        self, shape, device, block_size=None, sampling_eps_min=1e-3, sampling_eps_max=1.0
+    ):
         """Sample timesteps, one per block."""
         if block_size is None:
             block_size = self.block_size
@@ -199,7 +211,9 @@ class ABD3Diffusion(L.LightningModule):
         _eps_b = torch.rand(batch_size, num_blocks, device=device)
 
         if self.antithetic_sampling:
-            offset = torch.arange(batch_size * num_blocks, device=device) / (batch_size * num_blocks)
+            offset = torch.arange(batch_size * num_blocks, device=device) / (
+                batch_size * num_blocks
+            )
             offset = offset.view(batch_size, num_blocks)
             _eps_b = (_eps_b / (batch_size * num_blocks) + offset) % 1
 
@@ -214,16 +228,21 @@ class ABD3Diffusion(L.LightningModule):
     # Training loss (with self-conditioning + mixed block sizes)
     # ========================================================================
 
-    def _forward_pass_diffusion(self, x0, block_size=None,
-                                 sampling_eps_min=1e-3, sampling_eps_max=1.0):
+    def _forward_pass_diffusion(
+        self, x0, block_size=None, sampling_eps_min=1e-3, sampling_eps_max=1.0
+    ):
         """Compute diffusion training loss with RDR innovations."""
         if block_size is None:
             block_size = self.block_size
 
         # Sample timesteps (one per block, repeated across block tokens)
-        t = self._sample_t(x0.shape, x0.device, block_size=block_size,
-                           sampling_eps_min=sampling_eps_min,
-                           sampling_eps_max=sampling_eps_max)
+        t = self._sample_t(
+            x0.shape,
+            x0.device,
+            block_size=block_size,
+            sampling_eps_min=sampling_eps_min,
+            sampling_eps_max=sampling_eps_max,
+        )
 
         loss_scale, p = self.noise(t)
 
@@ -243,31 +262,28 @@ class ABD3Diffusion(L.LightningModule):
         # ---- RDR: Recurrent Draft Refinement (Innovation #1) ----
         # With probability self_cond_prob, generate a draft and feed it back
         prev_x0_hat = None
-        if self.self_conditioning and self.training:
-            if torch.rand(1).item() < self.self_cond_prob:
-                with torch.no_grad():
-                    logits_init = self.forward(
-                        x_t, sigma, x0=x0, prev_x0_hat=None,
-                        block_size=block_size)
-                    prev_x0_hat = logits_init.argmax(dim=-1).detach()
+        if self.self_conditioning and self.training and torch.rand(1).item() < self.self_cond_prob:
+            with torch.no_grad():
+                logits_init = self.forward(
+                    x_t, sigma, x0=x0, prev_x0_hat=None, block_size=block_size
+                )
+                prev_x0_hat = logits_init.argmax(dim=-1).detach()
 
         # ---- Two-stream forward (Innovation #2) ----
         model_output = self.forward(
-            x_t, sigma, x0=x0, prev_x0_hat=prev_x0_hat,
-            block_size=block_size)
+            x_t, sigma, x0=x0, prev_x0_hat=prev_x0_hat, block_size=block_size
+        )
 
-        utils.print_nans(model_output, 'model_output')
+        utils.print_nans(model_output, "model_output")
 
         # Compute loss
-        log_p_theta = torch.gather(
-            input=model_output, dim=-1,
-            index=x0[:, :, None]).squeeze(-1)
+        log_p_theta = torch.gather(input=model_output, dim=-1, index=x0[:, :, None]).squeeze(-1)
         loss = loss_scale * log_p_theta
         return loss
 
     def _loss(self, x0, attention_mask, sampling_eps_min=None, sampling_eps_max=None):
         if sampling_eps_min is None:
-            sampling_eps_min = getattr(self.config.training, 'sampling_eps', 1e-3)
+            sampling_eps_min = getattr(self.config.training, "sampling_eps", 1e-3)
         if sampling_eps_max is None:
             sampling_eps_max = 1.0
 
@@ -285,9 +301,11 @@ class ABD3Diffusion(L.LightningModule):
             block_size = self.block_size
 
         loss = self._forward_pass_diffusion(
-            x0, block_size=block_size,
+            x0,
+            block_size=block_size,
             sampling_eps_min=sampling_eps_min,
-            sampling_eps_max=sampling_eps_max)
+            sampling_eps_max=sampling_eps_max,
+        )
 
         nlls = loss * attention_mask
         token_nll = nlls.sum() / attention_mask.sum()
@@ -298,15 +316,27 @@ class ABD3Diffusion(L.LightningModule):
     # ========================================================================
 
     def training_step(self, batch, batch_idx):
-        losses = self._loss(batch['input_ids'], batch['attention_mask'])
-        self.log('train/loss', losses.loss.item(), on_step=True, on_epoch=False,
-                 sync_dist=True, prog_bar=True)
+        losses = self._loss(batch["input_ids"], batch["attention_mask"])
+        self.log(
+            "train/loss",
+            losses.loss.item(),
+            on_step=True,
+            on_epoch=False,
+            sync_dist=True,
+            prog_bar=True,
+        )
         return losses.loss
 
     def validation_step(self, batch, batch_idx):
-        losses = self._loss(batch['input_ids'], batch['attention_mask'])
-        self.log('val/loss', losses.loss.item(), on_step=False, on_epoch=True,
-                 sync_dist=True, prog_bar=True)
+        losses = self._loss(batch["input_ids"], batch["attention_mask"])
+        self.log(
+            "val/loss",
+            losses.loss.item(),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            prog_bar=True,
+        )
         return losses.loss
 
     def on_validation_epoch_end(self):
@@ -319,19 +349,22 @@ class ABD3Diffusion(L.LightningModule):
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if 'bias' in name or 'norm' in name or 'embedding' in name:
+            if "bias" in name or "norm" in name or "embedding" in name:
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
 
-        optimizer = torch.optim.AdamW([
-            {'params': decay_params, 'weight_decay': self.config.optim.weight_decay},
-            {'params': no_decay_params, 'weight_decay': 0.0},
-        ], lr=self.config.optim.lr,
-           betas=(self.config.optim.beta1, self.config.optim.beta2))
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params, "weight_decay": self.config.optim.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
+            lr=self.config.optim.lr,
+            betas=(self.config.optim.beta1, self.config.optim.beta2),
+        )
 
         # Linear warmup + cosine decay
-        warmup_steps = getattr(self.config.optim, 'warmup_steps', 1000)
+        warmup_steps = getattr(self.config.optim, "warmup_steps", 1000)
         max_steps = self.config.training.max_steps
 
         def lr_lambda(step):
@@ -342,12 +375,12 @@ class ABD3Diffusion(L.LightningModule):
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': scheduler,
-                'interval': 'step',
-                'frequency': 1,
-            }
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
         }
 
     def optimizer_step(self, *args, **kwargs):
@@ -363,7 +396,7 @@ class ABD3Diffusion(L.LightningModule):
     # ========================================================================
     def on_save_checkpoint(self, checkpoint):
         if self.ema is not None:
-            checkpoint['ema'] = self.ema.state_dict()
+            checkpoint["ema"] = self.ema.state_dict()
 
     def on_load_checkpoint(self, checkpoint):
         # HOOK ORDERING NOTE: In Lightning's load_from_checkpoint classmethod,
@@ -374,11 +407,12 @@ class ABD3Diffusion(L.LightningModule):
         # which callers invoke after load.
         if self.ema is None:
             return
-        if 'ema' in checkpoint:
-            self.ema.load_state_dict(checkpoint['ema'])
+        if "ema" in checkpoint:
+            self.ema.load_state_dict(checkpoint["ema"])
             self._ema_needs_live_reseed = False
         else:
             import warnings
+
             warnings.warn(
                 "Checkpoint has no 'ema' key — will fall back to live weights "
                 "after load_state_dict completes. Call "
@@ -401,9 +435,7 @@ class ABD3Diffusion(L.LightningModule):
         """
         if self.ema is None:
             return
-        self.ema.shadow_params = [
-            p.clone().detach() for p in self._get_parameters()
-        ]
+        self.ema.shadow_params = [p.clone().detach() for p in self._get_parameters()]
         self._ema_needs_live_reseed = False
 
     # ========================================================================
@@ -411,12 +443,12 @@ class ABD3Diffusion(L.LightningModule):
     # ========================================================================
 
     def _sample_prior(self, n_samples, seq_len):
-        return torch.full((n_samples, seq_len), self.mask_index,
-                          dtype=torch.long, device=self.device)
+        return torch.full(
+            (n_samples, seq_len), self.mask_index, dtype=torch.long, device=self.device
+        )
 
     @torch.no_grad()
-    def _denoise_tail_block(self, x_accum, t, dt, block_size,
-                            prev_x0_hat=None):
+    def _denoise_tail_block(self, x_accum, t, dt, block_size, prev_x0_hat=None):
         """One DDPM step on the block at the tail of ``x_accum``.
 
         Sliding-window semi-AR: ``x_accum`` is always ``[B, (k+1)*block_size]``
@@ -463,8 +495,13 @@ class ABD3Diffusion(L.LightningModule):
             full_prev[:, -block_size:] = prev_x0_hat
 
         log_p = self.forward(
-            x_accum, sigma_t, x0=x0_context, prev_x0_hat=full_prev,
-            block_size=block_size, sample_mode=True)
+            x_accum,
+            sigma_t,
+            x0=x0_context,
+            prev_x0_hat=full_prev,
+            block_size=block_size,
+            sample_mode=True,
+        )
         p_x0 = log_p[:, -block_size:].to(torch.float64).exp()
 
         new_x0_hat = p_x0.argmax(dim=-1)
@@ -486,16 +523,16 @@ class ABD3Diffusion(L.LightningModule):
     @torch.no_grad()
     def _check_early_stop(self, p_x0, prev_prediction, step):
         """Check if denoising should stop early (Innovation #4).
-        
+
         Criteria:
         1. Entropy of predictions is below threshold
         2. Consecutive predictions agree for N steps
-        
+
         Args:
             p_x0: [B, block_size, V] current prediction probabilities
             prev_prediction: [B, block_size] previous argmax prediction
             step: current step number
-        
+
         Returns:
             bool: whether to stop early
         """
@@ -517,8 +554,9 @@ class ABD3Diffusion(L.LightningModule):
         return False
 
     @torch.no_grad()
-    def sample(self, n_samples, num_steps=None, block_size=None,
-               track_nfe_per_block=False, progress=True):
+    def sample(
+        self, n_samples, num_steps=None, block_size=None, track_nfe_per_block=False, progress=True
+    ):
         """Generate samples with all ABD3 innovations (semi-AR, sliding window).
 
         Sampling flow (one block at a time, left-to-right):
@@ -557,8 +595,7 @@ class ABD3Diffusion(L.LightningModule):
         seq_len = self.num_tokens
         if seq_len % block_size != 0:
             raise ValueError(
-                f"sample(): seq_len ({seq_len}) must be divisible by "
-                f"block_size ({block_size})"
+                f"sample(): seq_len ({seq_len}) must be divisible by " f"block_size ({block_size})"
             )
         num_blocks = seq_len // block_size
 
@@ -575,19 +612,17 @@ class ABD3Diffusion(L.LightningModule):
 
         block_iter = range(num_blocks)
         if progress:
-            block_iter = tqdm(block_iter, desc='blocks')
+            block_iter = tqdm(block_iter, desc="blocks")
 
-        for block_idx in block_iter:
+        for _block_idx in block_iter:
             # Append a fresh all-masks block at the tail.
             new_block = self._sample_prior(n_samples, block_size)
-            x_accum = new_block if x_accum is None else torch.cat(
-                [x_accum, new_block], dim=1)
+            x_accum = new_block if x_accum is None else torch.cat([x_accum, new_block], dim=1)
 
-            timesteps = torch.linspace(1, eps, num_steps + 1,
-                                        device=self.device)
+            timesteps = torch.linspace(1, eps, num_steps + 1, device=self.device)
 
-            prev_x0_hat = None           # self-conditioning buffer
-            prev_prediction = None       # adaptive-stopping agreement buffer
+            prev_x0_hat = None  # self-conditioning buffer
+            prev_prediction = None  # adaptive-stopping agreement buffer
             consecutive_agreements = 0
             block_nfe = 0
 
@@ -595,14 +630,14 @@ class ABD3Diffusion(L.LightningModule):
                 t = timesteps[step_idx] * ones
 
                 prev_x0_hat, x_accum = self._denoise_tail_block(
-                    x_accum, t, dt, block_size, prev_x0_hat=prev_x0_hat)
+                    x_accum, t, dt, block_size, prev_x0_hat=prev_x0_hat
+                )
 
                 total_nfes += 1
                 block_nfe += 1
 
                 if self.adaptive_stopping and step_idx > 2:
-                    if (prev_prediction is not None
-                            and (prev_x0_hat == prev_prediction).all()):
+                    if prev_prediction is not None and (prev_x0_hat == prev_prediction).all():
                         consecutive_agreements += 1
                     else:
                         consecutive_agreements = 0
@@ -627,8 +662,8 @@ class ABD3Diffusion(L.LightningModule):
             self.ema.copy_to(self._get_parameters())
 
         samples, nfes = self.sample(
-            n_samples=self.config.loader.eval_batch_size,
-            num_steps=num_steps)
+            n_samples=self.config.loader.eval_batch_size, num_steps=num_steps
+        )
 
         text_samples = self.tokenizer.batch_decode(samples)
 

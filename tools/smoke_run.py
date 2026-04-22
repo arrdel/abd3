@@ -7,17 +7,20 @@ Usage:
 
 This is for local validation during development; it does not require GPUs.
 """
-import torch
-from hydra import compose, initialize_config_dir
+
 import os
-from abd3 import diffusion, dataloader
+
+import torch
 import transformers
+from hydra import compose, initialize_config_dir
+
+from abd3 import dataloader, diffusion
 
 
 def main():
-    config_dir = os.path.abspath('configs')
+    config_dir = os.path.abspath("configs")
     with initialize_config_dir(version_base=None, config_dir=config_dir):
-        cfg = compose(config_name='feasibility')
+        cfg = compose(config_name="feasibility")
     cfg.loader.batch_size = 2
     cfg.loader.eval_batch_size = 2
     cfg.training.max_steps = 1
@@ -34,11 +37,11 @@ def main():
     # move to cpu
     for k, v in batch.items():
         if isinstance(v, torch.Tensor):
-            batch[k] = v.to('cpu')
+            batch[k] = v.to("cpu")
 
     loss = model.training_step(batch, 0)
-    print('Smoke step loss:', loss)
+    print("Smoke step loss:", loss)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

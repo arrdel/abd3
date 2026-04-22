@@ -31,15 +31,13 @@ Library usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import dataclasses
 import json
 import math
-import os
 import pathlib
 import sys
 import time
-from typing import Iterable, Iterator, Optional
+from collections.abc import Iterable
 
 import torch
 import transformers
@@ -55,7 +53,6 @@ if str(_ROOT) not in sys.path:
 from abd3 import dataloader as abd3_dataloader  # noqa: E402
 from abd3.diffusion import ABD3Diffusion  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Checkpoint / config plumbing
 # ---------------------------------------------------------------------------
@@ -63,7 +60,7 @@ from abd3.diffusion import ABD3Diffusion  # noqa: E402
 
 def _compose_config(
     config_name: str = "feasibility",
-    overrides: Optional[list[str]] = None,
+    overrides: list[str] | None = None,
 ) -> DictConfig:
     """Re-compose the Hydra config that was used to train the checkpoint.
 
@@ -89,7 +86,7 @@ def _build_tokenizer(cfg: DictConfig) -> transformers.PreTrainedTokenizer:
 def load_abd3_from_checkpoint(
     checkpoint_path: str,
     config_name: str = "feasibility",
-    overrides: Optional[list[str]] = None,
+    overrides: list[str] | None = None,
     device: str = "cpu",
     use_ema: bool = True,
 ) -> tuple[ABD3Diffusion, DictConfig, transformers.PreTrainedTokenizer]:
@@ -169,8 +166,7 @@ class PPLResult:
     def summary_line(self) -> str:
         ckpt = pathlib.Path(self.checkpoint).name
         spread = (
-            f"  per-pass ppl range: "
-            f"{min(self.per_pass_ppl):.2f}..{max(self.per_pass_ppl):.2f}"
+            f"  per-pass ppl range: " f"{min(self.per_pass_ppl):.2f}..{max(self.per_pass_ppl):.2f}"
             if len(self.per_pass_ppl) > 1
             else ""
         )
@@ -192,7 +188,7 @@ def compute_perplexity(
     n_samples: int = 8,
     device: str = "cpu",
     seed: int = 42,
-    max_batches: Optional[int] = None,
+    max_batches: int | None = None,
     progress: bool = True,
 ) -> PPLResult:
     """Return the MC-ELBO perplexity of ``model`` on ``val_loader``.
@@ -226,6 +222,8 @@ def compute_perplexity(
 
         pass_nll = 0.0
         pass_tokens = 0
+        # A plain counter is clearer here than enumerate because it's used
+        # both to gate (``max_batches``) and to display 1-indexed progress.
         batches_seen = 0
 
         for batch in val_loader:
@@ -245,7 +243,7 @@ def compute_perplexity(
             if mc == 0:
                 n_sequences += int(x.shape[0])
 
-            batches_seen += 1
+            batches_seen += 1  # noqa: SIM113
             if progress:
                 running_nll = pass_nll / max(pass_tokens, 1)
                 sys.stdout.write(
@@ -256,9 +254,7 @@ def compute_perplexity(
                 sys.stdout.flush()
 
         if pass_tokens == 0:
-            raise RuntimeError(
-                "No tokens seen on validation pass; is the dataloader empty?"
-            )
+            raise RuntimeError("No tokens seen on validation pass; is the dataloader empty?")
 
         per_pass_ppl.append(math.exp(pass_nll / pass_tokens))
         total_nll_sum += pass_nll
@@ -304,29 +300,44 @@ def _build_argparser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument("--checkpoint", required=True, help="Path to a Lightning .ckpt file.")
-    ap.add_argument("--config-name", default="feasibility",
-                    help="Hydra config under configs/ (e.g. feasibility, config).")
     ap.add_argument(
-        "--overrides", nargs="*", default=[],
+        "--config-name",
+        default="feasibility",
+        help="Hydra config under configs/ (e.g. feasibility, config).",
+    )
+    ap.add_argument(
+        "--overrides",
+        nargs="*",
+        default=[],
         help="Hydra-style overrides, e.g. data=ptb block_size=8.",
     )
-    ap.add_argument("--n-samples", type=int, default=8,
-                    help="Monte-Carlo ELBO draws (BD3-LMs default = 8).")
+    ap.add_argument(
+        "--n-samples", type=int, default=8, help="Monte-Carlo ELBO draws (BD3-LMs default = 8)."
+    )
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    ap.add_argument("--use-ema", dest="use_ema", action="store_true", default=True,
-                    help="Swap EMA shadow params in for eval (the train-time default).")
-    ap.add_argument("--no-ema", dest="use_ema", action="store_false",
-                    help="Evaluate the live (non-EMA) params instead.")
-    ap.add_argument("--max-batches", type=int, default=None,
-                    help="Cap val batches per MC pass (smoke runs).")
+    ap.add_argument(
+        "--use-ema",
+        dest="use_ema",
+        action="store_true",
+        default=True,
+        help="Swap EMA shadow params in for eval (the train-time default).",
+    )
+    ap.add_argument(
+        "--no-ema",
+        dest="use_ema",
+        action="store_false",
+        help="Evaluate the live (non-EMA) params instead.",
+    )
+    ap.add_argument(
+        "--max-batches", type=int, default=None, help="Cap val batches per MC pass (smoke runs)."
+    )
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--json-out", default=None,
-                    help="Optional path to dump the PPLResult as JSON.")
+    ap.add_argument("--json-out", default=None, help="Optional path to dump the PPLResult as JSON.")
     ap.add_argument("--no-progress", dest="progress", action="store_false", default=True)
     return ap
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
     print(f"[ppl] loading checkpoint: {args.checkpoint}")
@@ -351,13 +362,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Force num_workers=0 for eval — avoids the same DataLoader-worker crash
     # that bit us during ablation runs on the shared host.
     from omegaconf import open_dict
+
     with open_dict(cfg):
         cfg.loader.num_workers = 0
 
     _, val_loader = abd3_dataloader.get_dataloaders(cfg, tok)
 
     result = compute_perplexity(
-        model, val_loader,
+        model,
+        val_loader,
         n_samples=args.n_samples,
         device=args.device,
         seed=args.seed,

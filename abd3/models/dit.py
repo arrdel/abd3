@@ -9,14 +9,11 @@ Key changes from BD3-LMs DIT:
 """
 
 import math
-import typing
-from functools import partial
 
-import einops
-from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 try:
     import flash_attn
@@ -25,7 +22,9 @@ except ImportError:
     flash_attn = None
 
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    # Availability probe only; the attention module does the actual import.
+    import torch.nn.attention.flex_attention  # noqa: F401
+
     FLEX_ATTN_AVAILABLE = True
 except ImportError:
     FLEX_ATTN_AVAILABLE = False
@@ -33,7 +32,7 @@ except ImportError:
 import huggingface_hub
 import omegaconf
 
-from .attention import generate_masks_for_block_size, MaskCache
+from .attention import MaskCache
 
 # ============================================================================
 # JIT fusion flags
@@ -48,11 +47,12 @@ torch._C._jit_override_can_fuse_on_gpu(True)
 # Utility functions (inherited from BD3-LMs)
 # ============================================================================
 
+
 def bias_dropout_add_scale(
     x: torch.Tensor,
-    bias: typing.Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     scale: torch.Tensor,
-    residual: typing.Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     prob: float,
     training: bool,
 ) -> torch.Tensor:
@@ -66,16 +66,24 @@ def bias_dropout_add_scale(
 
 
 @torch.jit.script
-def bias_dropout_add_scale_fused_train(x: torch.Tensor, bias: typing.Optional[torch.Tensor],
-                                        scale: torch.Tensor, residual: typing.Optional[torch.Tensor],
-                                        prob: float) -> torch.Tensor:
+def bias_dropout_add_scale_fused_train(
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    scale: torch.Tensor,
+    residual: torch.Tensor | None,
+    prob: float,
+) -> torch.Tensor:
     return bias_dropout_add_scale(x, bias, scale, residual, prob, True)
 
 
 @torch.jit.script
-def bias_dropout_add_scale_fused_inference(x: torch.Tensor, bias: typing.Optional[torch.Tensor],
-                                            scale: torch.Tensor, residual: typing.Optional[torch.Tensor],
-                                            prob: float) -> torch.Tensor:
+def bias_dropout_add_scale_fused_inference(
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    scale: torch.Tensor,
+    residual: torch.Tensor | None,
+    prob: float,
+) -> torch.Tensor:
     return bias_dropout_add_scale(x, bias, scale, residual, prob, False)
 
 
@@ -88,11 +96,12 @@ def modulate_fused(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) ->
 # Positional embeddings
 # ============================================================================
 
+
 class Rotary(nn.Module):
     def __init__(self, dim, base=10_000):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        self.register_buffer("inv_freq", inv_freq)
         self.seq_len_cached = None
         self.cos_cached = None
         self.sin_cached = None
@@ -106,13 +115,13 @@ class Rotary(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
             self.cos_cached = emb.cos()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
             self.sin_cached = emb.sin()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
-            self.cos_cached[:, :, 2, :, :].fill_(1.)
-            self.sin_cached[:, :, 2, :, :].fill_(0.)
+            self.cos_cached[:, :, 2, :, :].fill_(1.0)
+            self.sin_cached[:, :, 2, :, :].fill_(0.0)
         return self.cos_cached, self.sin_cached
 
 
 def rotate_half(x):
-    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -121,14 +130,15 @@ def apply_rotary_pos_emb_torchscript(qkv, cos, sin):
 
 
 def apply_rotary_pos_emb(qkv, cos, sin):
-    cos = cos[0, :, 0, 0, :cos.shape[-1] // 2]
-    sin = sin[0, :, 0, 0, :sin.shape[-1] // 2]
+    cos = cos[0, :, 0, 0, : cos.shape[-1] // 2]
+    sin = sin[0, :, 0, 0, : sin.shape[-1] // 2]
     return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
 
 
 # ============================================================================
 # Core layers
 # ============================================================================
+
 
 class LayerNorm(nn.Module):
     def __init__(self, dim):
@@ -138,7 +148,7 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         # Device-agnostic autocast (works on CPU, CUDA, MPS)
-        device_type = x.device.type if x.device.type != 'mps' else 'cpu'
+        device_type = x.device.type if x.device.type != "mps" else "cpu"
         with torch.amp.autocast(device_type, enabled=False):
             x = F.layer_norm(x.float(), [self.dim])
         return x * self.weight[None, None, :]
@@ -146,20 +156,22 @@ class LayerNorm(nn.Module):
 
 class TimestepEmbedder(nn.Module):
     """Embeds scalar timesteps into vector representations."""
+
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True))
+            nn.Linear(hidden_size, hidden_size, bias=True),
+        )
         self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
         half = dim // 2
         freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half).to(t.dtype).to(t.device) / half)
+            -math.log(max_period) * torch.arange(start=0, end=half).to(t.dtype).to(t.device) / half
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
@@ -201,7 +213,8 @@ class DDiTFinalLayer(nn.Module):
                 shift, scale = self.adaLN_modulation(c)[:, None].chunk(2, dim=2)
             else:
                 shift, scale = rearrange(
-                    self.adaLN_modulation(c), '(b h) d -> b h d', b=x.shape[0]).chunk(2, dim=-1)
+                    self.adaLN_modulation(c), "(b h) d -> b h d", b=x.shape[0]
+                ).chunk(2, dim=-1)
             x = modulate_fused(x, shift, scale)
         x = self.linear(x)
         return x
@@ -210,6 +223,7 @@ class DDiTFinalLayer(nn.Module):
 # ============================================================================
 # Two-Stream Transformer Block (ABD3 core innovation)
 # ============================================================================
+
 
 class TwoStreamDiTBlock(nn.Module):
     """Transformer block with separate self-attention (x_t) and cross-attention (to x_0).
@@ -221,9 +235,19 @@ class TwoStreamDiTBlock(nn.Module):
     This halves the attention cost from O((2N)²) to O(N²) + O(N·N_past).
     """
 
-    def __init__(self, n, dim, n_heads, cond_dim, adaLN=True,
-                 mlp_ratio=4, dropout=0.1, block_size=1,
-                 attn_backend='flash_attn', max_seqlen=1024):
+    def __init__(
+        self,
+        n,
+        dim,
+        n_heads,
+        cond_dim,
+        adaLN=True,
+        mlp_ratio=4,
+        dropout=0.1,
+        block_size=1,
+        attn_backend="flash_attn",
+        max_seqlen=1024,
+    ):
         super().__init__()
         self.n = n
         self.n_heads = n_heads
@@ -249,8 +273,9 @@ class TwoStreamDiTBlock(nn.Module):
         self.norm2 = LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_ratio * dim, bias=True),
-            nn.GELU(approximate='tanh'),
-            nn.Linear(mlp_ratio * dim, dim, bias=True))
+            nn.GELU(approximate="tanh"),
+            nn.Linear(mlp_ratio * dim, dim, bias=True),
+        )
 
         self.dropout = dropout
 
@@ -274,25 +299,26 @@ class TwoStreamDiTBlock(nn.Module):
     def _self_attention(self, x, rotary_cos_sin, mask=None):
         """Block-diagonal self-attention on x_t."""
         qkv = self.self_attn_qkv(x)
-        qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
+        qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, h=self.n_heads)
 
-        with torch.amp.autocast(x.device.type if x.device.type != 'mps' else 'cpu', enabled=False):
+        with torch.amp.autocast(x.device.type if x.device.type != "mps" else "cpu", enabled=False):
             cos, sin = rotary_cos_sin
-            if self.attn_backend == 'flash_attn' and flash_attn is not None:
+            if self.attn_backend == "flash_attn" and flash_attn is not None:
                 qkv = apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
             else:
                 qkv = apply_rotary_pos_emb_torchscript(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
 
         # SDPA attention with block-diagonal mask
         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-        q, k, v = [rearrange(t, 'b s h d -> b h s d') for t in [q, k, v]]
+        q, k, v = (rearrange(t, "b s h d -> b h s d") for t in [q, k, v])
 
         if mask is not None and not isinstance(mask, bool):
-            mask = mask.bool() if hasattr(mask, 'bool') else mask
+            mask = mask.bool() if hasattr(mask, "bool") else mask
 
         attn_out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0)
-        attn_out = rearrange(attn_out, 'b h s d -> b s (h d)')
+            q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0
+        )
+        attn_out = rearrange(attn_out, "b h s d -> b s (h d)")
         return self.self_attn_out(attn_out)
 
     def _cross_attention(self, x, x0_kv, cross_mask=None):
@@ -301,21 +327,30 @@ class TwoStreamDiTBlock(nn.Module):
             return torch.zeros_like(x)
 
         q = self.cross_attn_q(x)
-        q = rearrange(q, 'b s (h d) -> b h s d', h=self.n_heads)
+        q = rearrange(q, "b s (h d) -> b h s d", h=self.n_heads)
 
         kv = self.cross_attn_kv(x0_kv)
-        k, v = rearrange(kv, 'b s (two h d) -> two b h s d', two=2, h=self.n_heads)
+        k, v = rearrange(kv, "b s (two h d) -> two b h s d", two=2, h=self.n_heads)
 
         if cross_mask is not None and not isinstance(cross_mask, bool):
-            cross_mask = cross_mask.bool() if hasattr(cross_mask, 'bool') else cross_mask
+            cross_mask = cross_mask.bool() if hasattr(cross_mask, "bool") else cross_mask
 
         attn_out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=cross_mask, dropout_p=self.dropout if self.training else 0.0)
-        attn_out = rearrange(attn_out, 'b h s d -> b s (h d)')
+            q, k, v, attn_mask=cross_mask, dropout_p=self.dropout if self.training else 0.0
+        )
+        attn_out = rearrange(attn_out, "b h s d -> b s (h d)")
         return self.cross_attn_out(attn_out)
 
-    def forward(self, x, rotary_cos_sin, c=None, x0_embed=None,
-                self_attn_mask=None, cross_attn_mask=None, **kwargs):
+    def forward(
+        self,
+        x,
+        rotary_cos_sin,
+        c=None,
+        x0_embed=None,
+        self_attn_mask=None,
+        cross_attn_mask=None,
+        **kwargs,
+    ):
         """
         Args:
             x: [B, N, D] - x_t embeddings (N tokens, NOT 2N)
@@ -338,13 +373,20 @@ class TwoStreamDiTBlock(nn.Module):
                 chunks = self.adaLN_modulation(c)[:, None].chunk(9, dim=2)
             else:
                 chunks = rearrange(
-                    self.adaLN_modulation(c), '(b h) d -> b h d', b=batch_size
+                    self.adaLN_modulation(c), "(b h) d -> b h d", b=batch_size
                 ).chunk(9, dim=-1)
-            (shift_msa, scale_msa, gate_msa,
-             gate_cross,
-             shift_mlp, scale_mlp, gate_mlp,
-             # 2 extra for future use
-             _, _) = chunks
+            (
+                shift_msa,
+                scale_msa,
+                gate_msa,
+                gate_cross,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                # 2 extra for future use
+                _,
+                _,
+            ) = chunks
 
         # 1. Self-attention on x_t (block-diagonal)
         x_skip = x
@@ -377,11 +419,14 @@ class TwoStreamDiTBlock(nn.Module):
         if c is not None:
             x = bias_dropout_scale_fn(
                 self.mlp(modulate_fused(self.norm2(x), shift_mlp, scale_mlp)),
-                None, gate_mlp, x, self.dropout)
+                None,
+                gate_mlp,
+                x,
+                self.dropout,
+            )
         else:
             scale = torch.ones(1, device=x.device, dtype=x.dtype)
-            x = bias_dropout_scale_fn(
-                self.mlp(self.norm2(x)), None, scale, x, self.dropout)
+            x = bias_dropout_scale_fn(self.mlp(self.norm2(x)), None, scale, x, self.dropout)
 
         return x
 
@@ -390,9 +435,10 @@ class TwoStreamDiTBlock(nn.Module):
 # Main ABD3 DIT Model
 # ============================================================================
 
+
 class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     """ABD3 Discrete Diffusion Transformer with two-stream architecture.
-    
+
     Innovations:
     - Two-stream: x_t self-attention + cross-attention to x_0 (halves memory)
     - Per-block time conditioning via adaLN
@@ -413,7 +459,7 @@ class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         cond_dim = config.model.cond_dim
         self.n_heads = config.model.n_heads
         self.adaLN = True
-        self.attn_backend = getattr(config.model, 'attn_backend', 'sdpa')
+        self.attn_backend = getattr(config.model, "attn_backend", "sdpa")
 
         # Embeddings
         self.vocab_embed = EmbeddingLayer(dim, vocab_size)
@@ -430,38 +476,39 @@ class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         self.x0_proj = nn.Linear(dim, dim, bias=False)
 
         # Transformer blocks (two-stream)
-        self.blocks = nn.ModuleList([
-            TwoStreamDiTBlock(
-                n=config.model.length,
-                dim=dim,
-                n_heads=config.model.n_heads,
-                cond_dim=cond_dim,
-                adaLN=True,
-                dropout=config.model.dropout,
-                block_size=self.block_size,
-                attn_backend=self.attn_backend,
-                max_seqlen=getattr(config.model, 'max_seqlen', 1024))
-            for _ in range(config.model.n_blocks)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                TwoStreamDiTBlock(
+                    n=config.model.length,
+                    dim=dim,
+                    n_heads=config.model.n_heads,
+                    cond_dim=cond_dim,
+                    adaLN=True,
+                    dropout=config.model.dropout,
+                    block_size=self.block_size,
+                    attn_backend=self.attn_backend,
+                    max_seqlen=getattr(config.model, "max_seqlen", 1024),
+                )
+                for _ in range(config.model.n_blocks)
+            ]
+        )
 
         self.output_layer = DDiTFinalLayer(
-            hidden_size=dim,
-            out_channels=vocab_size,
-            cond_dim=cond_dim,
-            adaLN=True)
+            hidden_size=dim, out_channels=vocab_size, cond_dim=cond_dim, adaLN=True
+        )
 
         # Mask cache for efficient mixed block-size training
         self.mask_cache = MaskCache(self.n, self.attn_backend, device=None)
 
     def _encode_x0(self, x0_tokens):
         """Encode x_0 tokens into key-value representations.
-        
+
         This is done WITHOUT gradient (detached) to save memory.
         The x_0 embeddings serve as context for cross-attention.
-        
+
         Args:
             x0_tokens: [B, N] int tensor of clean token indices
-        
+
         Returns:
             x0_embed: [B, N, D] detached x_0 embeddings
         """
@@ -483,11 +530,19 @@ class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
             block.x0_kv_cache = None
             block.cache_idx = 0
 
-    def forward(self, x_t, sigma, x0=None, prev_x0_hat=None,
-                block_size=None, sample_mode=False, store_kv=False):
+    def forward(
+        self,
+        x_t,
+        sigma,
+        x0=None,
+        prev_x0_hat=None,
+        block_size=None,
+        sample_mode=False,
+        store_kv=False,
+    ):
         """
         Forward pass for ABD3.
-        
+
         Args:
             x_t: [B, N] int tensor - noised tokens (N tokens, NOT 2N)
             sigma: [B] float tensor - per-sample noise level (or per-block)
@@ -496,7 +551,7 @@ class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
             block_size: int - override block size (for mixed block-size training)
             sample_mode: bool - sampling mode (use cached KV)
             store_kv: bool - whether to store KV cache
-        
+
         Returns:
             logits: [B, N, V] - predicted token logits
         """
@@ -528,16 +583,19 @@ class ABD3DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
         # Get masks for current block size
         masks = self.mask_cache.get_masks(block_size, device=x.device)
-        self_attn_mask = masks['self_attn_mask'] if not sample_mode else None
-        cross_attn_mask = masks['cross_attn_mask'] if not sample_mode else None
+        self_attn_mask = masks["self_attn_mask"] if not sample_mode else None
+        cross_attn_mask = masks["cross_attn_mask"] if not sample_mode else None
 
         # Transformer forward (N tokens through self-attn + cross-attn)
         for block in self.blocks:
             x = block(
-                x, rotary_cos_sin, c=t_cond,
+                x,
+                rotary_cos_sin,
+                c=t_cond,
                 x0_embed=x0_embed,
                 self_attn_mask=self_attn_mask,
-                cross_attn_mask=cross_attn_mask)
+                cross_attn_mask=cross_attn_mask,
+            )
         x = self.output_layer(x, t_cond)
 
         return x  # [B, N, V] - only N tokens, not 2N!

@@ -5,9 +5,8 @@ Evaluation metrics for language modeling quality.
 """
 
 import torch
-from torch import Tensor
 import torchmetrics
-
+from torch import Tensor
 
 LOG2 = torch.log(torch.tensor(2.0))
 
@@ -29,11 +28,10 @@ class Perplexity(NLL):
 class Metrics:
     def __init__(self, config=None):
         self.config = config
-        metrics = torchmetrics.MetricCollection({
-            'nll': NLL(), 'bpd': BPD(), 'ppl': Perplexity()})
-        self.block_size = getattr(config, 'block_size', config.model.length)
-        self.train_nlls = metrics.clone(prefix='train/')
-        self.valid_nlls = metrics.clone(prefix='val/')
+        metrics = torchmetrics.MetricCollection({"nll": NLL(), "bpd": BPD(), "ppl": Perplexity()})
+        self.block_size = getattr(config, "block_size", config.model.length)
+        self.train_nlls = metrics.clone(prefix="train/")
+        self.valid_nlls = metrics.clone(prefix="val/")
         self.gen_ppl = Perplexity()
 
     def to(self, *args, **kwargs):

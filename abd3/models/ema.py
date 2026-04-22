@@ -48,7 +48,7 @@ class ExponentialMovingAverage:
                 f"EMA param count mismatch: checkpoint has {len(incoming)}, "
                 f"model has {len(self.shadow_params)}. Did the architecture change?"
             )
-        for i, (tgt, src) in enumerate(zip(self.shadow_params, incoming)):
+        for i, (tgt, src) in enumerate(zip(self.shadow_params, incoming, strict=False)):
             if tgt.shape != src.shape:
                 raise ValueError(
                     f"EMA shadow #{i} shape mismatch: checkpoint {tuple(src.shape)} "
@@ -64,19 +64,19 @@ class ExponentialMovingAverage:
     # ---------------------------------------------------------- mechanics
     def _align_device(self, parameters):
         parameters = list(parameters)
-        for i, (s_param, param) in enumerate(zip(self.shadow_params, parameters)):
+        for i, (s_param, param) in enumerate(zip(self.shadow_params, parameters, strict=False)):
             if s_param.device != param.device:
                 self.shadow_params[i] = s_param.to(param.device)
         return parameters
 
     def update(self, parameters):
         parameters = self._align_device(parameters)
-        for s_param, param in zip(self.shadow_params, parameters):
+        for s_param, param in zip(self.shadow_params, parameters, strict=False):
             s_param.data.mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
 
     def copy_to(self, parameters):
         parameters = self._align_device(parameters)
-        for s_param, param in zip(self.shadow_params, parameters):
+        for s_param, param in zip(self.shadow_params, parameters, strict=False):
             param.data.copy_(s_param.data)
 
     def store(self, parameters):
@@ -85,6 +85,6 @@ class ExponentialMovingAverage:
     def restore(self, parameters):
         if self.collected_params is None:
             raise RuntimeError("No parameters stored for restore")
-        for c_param, param in zip(self.collected_params, parameters):
+        for c_param, param in zip(self.collected_params, parameters, strict=False):
             param.data.copy_(c_param.data)
         self.collected_params = None

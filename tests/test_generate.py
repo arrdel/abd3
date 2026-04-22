@@ -25,7 +25,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from eval.generate import generate, SampleRecord  # noqa: E402
+from eval.generate import SampleRecord, generate  # noqa: E402
 
 
 class _FakeTokenizer:
@@ -68,8 +68,16 @@ def _make_model(
 def test_record_structure_and_nfe_accounting():
     model = _make_model(per_block_nfe=[10, 10, 7, 3, 3, 3, 3, 3])  # 8 blocks
     tok = _FakeTokenizer()
-    records = generate(model, tok, n_samples=3, num_steps=10, block_size=4,
-                       seed=7, algo_name="abd3", checkpoint_path="/tmp/ckpt")
+    records = generate(
+        model,
+        tok,
+        n_samples=3,
+        num_steps=10,
+        block_size=4,
+        seed=7,
+        algo_name="abd3",
+        checkpoint_path="/tmp/ckpt",
+    )
 
     assert len(records) == 3
     for i, r in enumerate(records):

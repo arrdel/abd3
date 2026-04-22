@@ -1,7 +1,7 @@
 """Tests for adaptive early stopping."""
 
-import torch
 import pytest
+import torch
 
 
 def test_low_entropy_triggers_stop():
@@ -25,5 +25,5 @@ def test_agreement_detection():
     assert not (pred1 == pred3).all(), "Different predictions should not agree"
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

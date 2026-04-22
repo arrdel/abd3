@@ -5,6 +5,7 @@ Inherited from BD3-LMs with no modifications needed.
 """
 
 import abc
+
 import torch
 import torch.nn as nn
 
@@ -12,18 +13,18 @@ import torch.nn as nn
 def get_noise(config, noise_type=None):
     if noise_type is None:
         noise_type = config.noise.type
-    if noise_type == 'loglinear':
+    if noise_type == "loglinear":
         return LogLinearNoise()
-    elif noise_type == 'square':
+    elif noise_type == "square":
         return ExpNoise(2)
-    elif noise_type == 'square_root':
+    elif noise_type == "square_root":
         return ExpNoise(0.5)
-    elif noise_type == 'log':
+    elif noise_type == "log":
         return LogarithmicNoise()
-    elif noise_type == 'cosine':
+    elif noise_type == "cosine":
         return CosineNoise()
     else:
-        raise ValueError(f'{noise_type} is not a valid noise')
+        raise ValueError(f"{noise_type} is not a valid noise")
 
 
 class Noise(abc.ABC, nn.Module):

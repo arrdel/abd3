@@ -74,7 +74,7 @@ def test_load_state_dict_restores_exact_values():
 
     tgt_ema.load_state_dict(captured)
     # After loading, shadows should match bit-for-bit.
-    for src_s, tgt_s in zip(src_ema.shadow_params, tgt_ema.shadow_params):
+    for src_s, tgt_s in zip(src_ema.shadow_params, tgt_ema.shadow_params, strict=False):
         assert torch.allclose(src_s, tgt_s, atol=0, rtol=0)
     # And decay should have been restored.
     assert tgt_ema.decay == pytest.approx(0.99)
@@ -89,10 +89,16 @@ def test_load_state_dict_rejects_shape_mismatch():
         ema.load_state_dict(bad)
 
     # Right count, wrong shape.
-    bad = {"decay": 0.9, "shadow_params": [torch.zeros_like(p).squeeze()
-                                            if p.ndim >= 2 else torch.zeros_like(p)
-                                            for p in ema.shadow_params]}
-    if any(s.shape != t.shape for s, t in zip(bad["shadow_params"], ema.shadow_params)):
+    bad = {
+        "decay": 0.9,
+        "shadow_params": [
+            torch.zeros_like(p).squeeze() if p.ndim >= 2 else torch.zeros_like(p)
+            for p in ema.shadow_params
+        ],
+    }
+    if any(
+        s.shape != t.shape for s, t in zip(bad["shadow_params"], ema.shadow_params, strict=False)
+    ):
         with pytest.raises(ValueError, match="shape mismatch"):
             ema.load_state_dict(bad)
 
