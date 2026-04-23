@@ -11,7 +11,7 @@
 PY            ?= python
 PYTEST        ?= $(PY) -m pytest
 CKPT_FEAS     ?= checkpoints/feasibility/epoch=43-step=4000.ckpt
-CKPT_BASELINE ?= checkpoints/ablation_baseline/epoch=33-step=3000.ckpt
+CKPT_BASELINE ?= checkpoints/ablation_baseline/epoch=32-step=3000.ckpt
 
 help:  ## Show this help.
 	@awk 'BEGIN {FS=":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -44,7 +44,8 @@ feas:  ## Full 5k-step feasibility run (requires ~24GB GPU).
 
 ppl:  ## Compute importance-weighted MC-ELBO PPL on the feasibility ckpt.
 	$(PY) -m eval.perplexity --checkpoint $(CKPT_FEAS) \
-		--config-name feasibility --split test --device cuda --use-ema
+		--config-name feasibility --device cuda --use-ema \
+		--json-out report/ppl/feasibility.json
 
 gen:  ## Generate 4 samples from the feasibility ckpt (semi-AR, block_size=4).
 	$(PY) -m eval.generate --checkpoint $(CKPT_FEAS) \

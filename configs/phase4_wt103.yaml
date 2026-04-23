@@ -1,0 +1,68 @@
+# =============================================================================
+# Phase 4 — Ablation playground on WikiText-103.
+# =============================================================================
+# dit_small (~110 M params) × WT103 × 200 k steps on 8-GPU DDP.
+# Used by scripts/run_phase4_wt103.sh to sweep A0-A6 ablations × 1 seed each.
+# =============================================================================
+
+defaults:
+  - algo: abd3
+  - model: dit_small
+  - data: wikitext103
+  - noise: loglinear
+  - _self_
+
+seed: 42
+mode: train
+block_size: 4
+
+tokenizer:
+  name: gpt2
+
+loader:
+  # Per-GPU batch 8 × 8 GPUs = 64 effective (no grad accum).
+  # Phase 4 is the ablation playground — effective batch 64 is sufficient
+  # signal for ranking innovations; Phase 5 (OWT) uses the full 512 for the
+  # headline number.  Memory: bs=8 seq=1024 dit_small bf16-SDPA fits ~18 GiB / GPU.
+  batch_size: 8
+  eval_batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  tokenization_cache: true
+
+training:
+  max_steps: 200000
+  ema: 0.9999
+  antithetic_sampling: true
+  sampling_eps: 1e-3
+  precision: bf16-mixed
+  accum: 1
+  val_check_interval: 5000
+
+optim:
+  lr: 3e-4
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 0.1
+  grad_clip: 1.0
+  warmup_steps: 2500  # ≈ 1.25 % of 200 k
+
+checkpointing:
+  save_dir: checkpoints/phase4/abd3/
+  save_every: 10000
+
+wandb:
+  enabled: true
+  project: abd3-wt103
+  name: abd3-wt103
+
+eval:
+  checkpoint_path: null
+  gen_ppl_eval_model_name_or_path: gpt2
+  perplexity_batch_size: 16
+  disable_ema: false
+
+sampling:
+  kv_cache: true
+  nucleus_p: 1.0
+  first_hitting: false
