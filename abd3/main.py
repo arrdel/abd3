@@ -4,6 +4,7 @@ ABD3: Block Diffusion with Recurrent Draft Refinement.
 Hydra entry point for training, evaluation, and sampling.
 """
 
+import datetime as _dt
 import os
 import sys
 
@@ -17,6 +18,91 @@ import transformers
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from abd3 import dataloader, diffusion
+
+
+def _resolve_run_name(config: omegaconf.DictConfig) -> str:
+    """Build a human-readable wandb run name from the resolved config.
+
+    Priority: ``config.wandb.name`` wins if set to something other than the
+    boilerplate ``abd3-run`` default; otherwise we synthesize from a small
+    set of fields that change run-to-run (dataset, block size, RDR/mixed/
+    adaptive flags, step budget) plus a UTC timestamp so re-runs don't
+    clobber each other in the dashboard.
+    """
+    custom = getattr(config.wandb, "name", None)
+    if custom and custom not in {"abd3-run", None, ""}:
+        return str(custom)
+
+    flags = []
+    if getattr(config.algo, "self_conditioning", False):
+        flags.append("rdr")
+    if getattr(config.algo, "mixed_block_sizes", False):
+        flags.append("mix")
+    if getattr(config.algo, "adaptive_stopping", False):
+        flags.append("astop")
+    flags_str = "+".join(flags) if flags else "base"
+
+    dataset = getattr(config.data, "name", "data").split("/")[-1]
+    block = int(getattr(config, "block_size", -1))
+    steps = int(getattr(config.training, "max_steps", 0))
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    return f"abd3-{dataset}-bs{block}-{flags_str}-s{steps}-{ts}"
+
+
+def _resolve_run_tags(config: omegaconf.DictConfig) -> list[str]:
+    """Tags let you filter 'all RDR runs' / 'all baseline runs' in one click."""
+    tags: list[str] = []
+    if getattr(config.algo, "self_conditioning", False):
+        tags.append("rdr")
+    else:
+        tags.append("baseline")
+    if getattr(config.algo, "mixed_block_sizes", False):
+        tags.append("mixed-bs")
+    if getattr(config.algo, "adaptive_stopping", False):
+        tags.append("adaptive-stop")
+    tags.append(f"bs={int(getattr(config, 'block_size', -1))}")
+    tags.append(f"data={getattr(config.data, 'name', 'unknown').replace('/', '-')}")
+    return tags
+
+
+def _build_logger(config: omegaconf.DictConfig):
+    """Return a Lightning logger, preferring WandB and falling back gracefully.
+
+    Fallback order:
+      1. ``config.wandb.enabled = True`` and the ``wandb`` package imports → WandbLogger
+      2. Anything else → CSVLogger under ``<cwd>/logs``
+
+    The ``ABD3_DISABLE_WANDB=1`` env-var short-circuits (1) even if the yaml
+    says otherwise — useful for CI / dry-runs where we don't want to spin
+    up a wandb session.
+    """
+    use_wandb = (
+        hasattr(config, "wandb")
+        and bool(getattr(config.wandb, "enabled", False))
+        and not os.environ.get("ABD3_DISABLE_WANDB")
+    )
+    if not use_wandb:
+        return L.pytorch.loggers.CSVLogger(save_dir=os.getcwd(), name="logs")
+
+    try:
+        import wandb  # noqa: F401
+    except ImportError:
+        print(
+            "[main] wandb not installed; falling back to CSVLogger. "
+            "Install with `pip install wandb` to enable cloud logging."
+        )
+        return L.pytorch.loggers.CSVLogger(save_dir=os.getcwd(), name="logs")
+
+    cfg_dict = omegaconf.OmegaConf.to_container(config, resolve=True)
+    return L.pytorch.loggers.WandbLogger(
+        project=getattr(config.wandb, "project", "abd3"),
+        name=_resolve_run_name(config),
+        tags=_resolve_run_tags(config),
+        save_dir=os.getcwd(),
+        config=cfg_dict,
+        log_model=False,  # checkpoints are big; track via ModelCheckpoint only.
+    )
+
 
 omegaconf.OmegaConf.register_new_resolver("cwd", os.getcwd)
 omegaconf.OmegaConf.register_new_resolver("device_count", torch.cuda.device_count)
@@ -79,11 +165,15 @@ def train(config, tokenizer):
     # Learning rate monitor
     callbacks.append(L.pytorch.callbacks.LearningRateMonitor(logging_interval="step"))
 
-    logger = None
-    if hasattr(config, "wandb") and config.wandb.enabled:
-        logger = L.pytorch.loggers.WandbLogger(project=config.wandb.project, name=config.wandb.name)
-    else:
-        logger = L.pytorch.loggers.CSVLogger(save_dir=os.getcwd(), name="logs")
+    logger = _build_logger(config)
+    print(
+        f"[main] logger: {type(logger).__name__}"
+        + (
+            f"  project={config.wandb.project}" f"  run_name={_resolve_run_name(config)}"
+            if isinstance(logger, L.pytorch.loggers.WandbLogger)
+            else ""
+        )
+    )
 
     # When training on >1 GPU, DDP needs `find_unused_parameters=True` because
     # `self_cond_proj` doesn't receive gradients on steps where the model is

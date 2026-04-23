@@ -300,6 +300,11 @@ class ABD3Diffusion(L.LightningModule):
         else:
             block_size = self.block_size
 
+        # Expose the block size actually used so training_step can emit
+        # a per-block-size loss series on WandB. Keeping this as a plain
+        # int attribute (not a buffer) keeps checkpoints unchanged.
+        self._last_loss_block_size = int(block_size)
+
         loss = self._forward_pass_diffusion(
             x0,
             block_size=block_size,
@@ -315,23 +320,73 @@ class ABD3Diffusion(L.LightningModule):
     # Training hooks
     # ========================================================================
 
+    @staticmethod
+    def _bounded_ppl(loss_value: float, cap: float = 30.0) -> float:
+        """Exp(loss) with a cap so a blown-up loss doesn't produce inf/nan
+        in WandB dashboards and corrupt auto-scaled y-axes."""
+        return math.exp(min(loss_value, cap))
+
     def training_step(self, batch, batch_idx):
         losses = self._loss(batch["input_ids"], batch["attention_mask"])
+        loss_val = float(losses.loss.item())
+
         self.log(
             "train/loss",
-            losses.loss.item(),
+            loss_val,
             on_step=True,
             on_epoch=False,
             sync_dist=True,
             prog_bar=True,
         )
+        self.log("train/ppl", self._bounded_ppl(loss_val), on_step=True, sync_dist=True)
+
+        # Per-block-size loss trace: only meaningful during mixed-block
+        # training (single-bs runs collapse to the global series and we'd
+        # rather not clutter WandB with a duplicate). ``_last_loss_block_size``
+        # is stashed by ``_loss`` at the top of every call.
+        bs_used = getattr(self, "_last_loss_block_size", None)
+        if bs_used is not None:
+            self.log("train/block_size", float(bs_used), on_step=True, sync_dist=False)
+            if self.mixed_block_sizes:
+                self.log(
+                    f"train/loss_bs{bs_used}",
+                    loss_val,
+                    on_step=True,
+                    sync_dist=True,
+                )
         return losses.loss
+
+    def on_before_optimizer_step(self, optimizer):
+        """Log global grad norm once per optimizer step.
+
+        Lightning's ``track_grad_norm`` is deprecated in recent versions,
+        so we compute it directly here. Using ``self.parameters()`` (not
+        the optimizer's param groups) is intentional: it covers EMA-related
+        params that aren't in the optimizer but still occupy a gradient.
+        """
+        total_sq = 0.0
+        for p in self.parameters():
+            if p.grad is None:
+                continue
+            total_sq += float(p.grad.detach().data.norm(2).item() ** 2)
+        grad_norm = math.sqrt(total_sq)
+        self.log("train/grad_norm", grad_norm, on_step=True, sync_dist=False)
 
     def validation_step(self, batch, batch_idx):
         losses = self._loss(batch["input_ids"], batch["attention_mask"])
+        loss_val = float(losses.loss.item())
+
         self.log(
             "val/loss",
-            losses.loss.item(),
+            loss_val,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            prog_bar=True,
+        )
+        self.log(
+            "val/ppl",
+            self._bounded_ppl(loss_val),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
