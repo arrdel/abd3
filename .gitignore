@@ -47,3 +47,8 @@ Thumbs.db
 report/
 /*.md
 !/README.md
+
+# ==========================================================================
+# Visualization scratch — keep committed figures but drop preview renders
+# ==========================================================================
+figures/_preview/
